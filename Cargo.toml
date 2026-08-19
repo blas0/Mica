@@ -1,0 +1,46 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/mica-core",
+    "crates/mica-atlas",
+    "crates/mica-gpu",
+    "crates/mica-shell",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.90"
+license = "MIT"
+publish = false
+
+# Dependency set is deliberately small. The reference implementation ships
+# ~2.8 MB precisely because it has almost no third-party crates; every addition
+# here should have to justify itself.
+[workspace.dependencies]
+mica-core = { path = "crates/mica-core" }
+mica-atlas = { path = "crates/mica-atlas" }
+mica-gpu = { path = "crates/mica-gpu" }
+
+alacritty_terminal = "0.26"
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = "0.3"
+objc2-metal = "0.3"
+objc2-quartz-core = "0.3"
+objc2-core-text = "0.3"
+objc2-core-foundation = "0.3"
+objc2-core-graphics = "0.3"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+# Kept deliberately: unwinding plus backtraces cost ~300 KB and buy real crash
+# reports during the beta.
+panic = "unwind"
+strip = "debuginfo"
