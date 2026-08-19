@@ -568,6 +568,15 @@ impl Surface {
         Ok(())
     }
 
+    /// The Metal device the renderer is using.
+    ///
+    /// The window layer must be given *this* device, not a freshly created
+    /// one: a drawable from a different device cannot be rendered into by
+    /// this renderer's command queue.
+    pub fn device(&self) -> &objc2::runtime::ProtocolObject<dyn objc2_metal::MTLDevice> {
+        self.renderer.context().device()
+    }
+
     pub fn renderer(&mut self) -> &mut Renderer {
         &mut self.renderer
     }

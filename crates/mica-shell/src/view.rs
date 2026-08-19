@@ -284,6 +284,16 @@ impl MicaView {
     }
 
     pub fn attach(&self, surface: Surface) {
+        // The layer's device has to be set before anything asks it for a
+        // drawable. A `CAMetalLayer` built by `makeBackingLayer` has a nil
+        // device, and a nil-device layer returns nil from `nextDrawable`
+        // forever — silently, with no error anywhere: the window simply stays
+        // blank. The device cannot be set in `makeBackingLayer` because it
+        // belongs to the renderer, which does not exist until the surface is
+        // opened, so it goes in here, before the first `synchronise_layer`.
+        if let Some(layer) = self.metal_layer() {
+            unsafe { layer.setDevice(Some(surface.device())) };
+        }
         *self.ivars().surface.borrow_mut() = Some(surface);
         self.synchronise_layer();
     }
