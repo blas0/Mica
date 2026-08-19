@@ -6,4 +6,16 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+# CoreText and CoreGraphics only. Metal lives one crate up; the separation is
+# what makes glyph packing and box-drawing geometry testable headlessly.
 [dependencies]
+objc2-core-foundation = { workspace = true, features = [
+    "CFString", "CFBase", "CFCGTypes", "CFDictionary", "CFAttributedString", "CFArray",
+] }
+objc2-core-graphics = { workspace = true, features = [
+    "CGContext", "CGColorSpace", "CGImage", "CGBitmapContext", "CGAffineTransform",
+    "CGBase", "CGFont",
+] }
+objc2-core-text = { workspace = true, features = [
+    "CTFont", "CTFontTraits", "CTFontDescriptor", "CTLine", "CTRun", "CTStringAttributes",
+] }
