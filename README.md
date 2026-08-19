@@ -18,7 +18,7 @@ Mica is not affiliated with Metalterm.
 ```sh
 export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:$PATH"
 
-cargo test --workspace     # 267 tests
+cargo test --workspace     # 328 tests
 ./bundle.sh release        # → target/release/Mica.app
 open target/release/Mica.app
 ```
@@ -103,7 +103,7 @@ arithmetically.
 | 6 AppKit shell | ✅ window, keys, menu, native tabbing |
 | 7 Shell integration | ✅ zsh, bash, fish |
 | 8 terminfo | ✅ `tic -x` + `infocmp -x` round-trip |
-| 9 Config, themes, palette | ◐ config and themes done; palette and find are not |
+| 9 Config, themes, palette, find | ✅ |
 | 10 Packaging | ◐ bundle and hardened runtime; notarisation not attempted |
 
 ### The two things that are not done
@@ -123,7 +123,26 @@ there — that is not a passing Phase 10 exit test.
 
 Also deliberately out of scope for v0.1, per the plan: splits, the full theme
 set, caret motion styles, block folding, OSC 9/777 notifications, Sparkle
-updates, the settings UI, and the content-aware renderers.
+updates, the settings UI, and the content-aware renderers. The palette lists
+`settings.fx.*` actions that are not implemented; `dispatch` returns `false` for
+them and says so on stderr rather than appearing to work.
+
+---
+
+## Keys
+
+| | |
+|---|---|
+| `⌘⇧P` | command palette |
+| `⌘F` | find in scrollback |
+| `⌘G` / `⌘⇧G` | next / previous match |
+| `⌘N` | new window (a tab, via native tabbing) |
+| `⌘C` / `⌘V` | copy selection / paste, bracketed |
+| `⎋` | close an overlay |
+
+Search is literal and smart-case: a lowercase query matches case-insensitively,
+a query containing an uppercase letter matches exactly. Regex is the obvious
+second step and `search.rs`'s `Matcher` enum is where it goes.
 
 ---
 

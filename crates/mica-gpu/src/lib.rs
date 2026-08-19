@@ -7,7 +7,9 @@
 pub mod context;
 pub mod frame;
 pub mod grid;
+pub mod overlay;
 pub mod renderer;
+pub mod search;
 
 pub use frame::{Decision, FrameScheduler, FrameStats, Reason};
 pub use grid::InstanceBuffers;

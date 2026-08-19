@@ -26,7 +26,7 @@ use mica_core::semantic::{Block, BlockStatus};
 use mica_core::sidetable::SideTables;
 
 /// Packed RGBA, ready for the `uchar4` the shaders unpack.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[repr(C)]
 pub struct Rgba(pub [u8; 4]);
 

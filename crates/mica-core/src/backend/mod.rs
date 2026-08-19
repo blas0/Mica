@@ -155,6 +155,22 @@ pub trait TerminalCore: Sized {
 
     /// A window title set via OSC 0/2, if it changed since the last call.
     fn take_title(&mut self) -> Option<String>;
+
+    /// The range of absolute line indices that exist, `(oldest, newest)`.
+    ///
+    /// Line 0 is the top of the visible screen; negatives reach into
+    /// scrollback, matching [`Point`].
+    fn line_bounds(&self) -> (i32, i32);
+
+    /// The text of one line, for **search only**.
+    ///
+    /// ⚠️ **Never call this from the render path.** It allocates a `String` per
+    /// line and reads rows regardless of damage, which is precisely the
+    /// behaviour [`dirty_rows`](Self::dirty_rows) exists to avoid. It is here
+    /// because searching a 200 MB scrollback is a real feature and it is a
+    /// user-initiated, once-per-query operation — not because the damage rule
+    /// has an exception.
+    fn line_text(&self, line: i32) -> Option<String>;
 }
 
 /// The backend this build selected, so callers can name one type.

@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 
 use alacritty_terminal::event::{Event as AlacEvent, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
-use alacritty_terminal::index::{Column, Point as AlacPoint, Side};
+use alacritty_terminal::index::{Column, Line, Point as AlacPoint, Side};
 use alacritty_terminal::selection::{Selection as AlacSelection, SelectionType};
 use alacritty_terminal::term::cell::{Cell as AlacCell, Flags as AlacFlags};
 use alacritty_terminal::term::{
@@ -374,6 +374,23 @@ impl TerminalCore for AlacrittyCore {
     fn take_title(&mut self) -> Option<String> {
         let mut sink = self.sink.0.lock().ok()?;
         sink.title.take()
+    }
+
+    fn line_bounds(&self) -> (i32, i32) {
+        let grid = self.term.grid();
+        // `topmost_line` is negative by the amount of history retained.
+        (grid.topmost_line().0, grid.bottommost_line().0)
+    }
+
+    fn line_text(&self, line: i32) -> Option<String> {
+        let (top, bottom) = self.line_bounds();
+        if line < top || line > bottom {
+            return None;
+        }
+        let cols = self.mirror.dimensions().0 as usize;
+        let start = AlacPoint::new(Line(line), Column(0));
+        let end = AlacPoint::new(Line(line), Column(cols.saturating_sub(1)));
+        Some(self.term.bounds_to_string(start, end))
     }
 }
 

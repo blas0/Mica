@@ -267,6 +267,17 @@ impl Session {
         self.core.side_tables()
     }
 
+    /// The range of absolute line indices that exist. Search only — see
+    /// [`TerminalCore::line_text`].
+    pub fn line_bounds(&self) -> (i32, i32) {
+        self.core.line_bounds()
+    }
+
+    /// The text of one line. **Search only**; never call this per frame.
+    pub fn line_text(&self, line: i32) -> Option<String> {
+        self.core.line_text(line)
+    }
+
     /// Test seam: feed bytes as if they had arrived on the PTY.
     #[cfg(test)]
     fn feed_for_test(&mut self, bytes: &[u8]) {

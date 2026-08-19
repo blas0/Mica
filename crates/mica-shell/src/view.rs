@@ -200,6 +200,19 @@ define_class!(
                 .map(|s| s.to_string())
                 .unwrap_or_default();
 
+            // Overlay shortcuts are checked before anything else so that ⌘F
+            // works even while an overlay already has the keyboard.
+            if self.handle_shortcut(&characters, modifiers) {
+                self.redraw();
+                return;
+            }
+            // An open overlay owns the keyboard. Without this, typing a query
+            // would also type it into the shell.
+            if self.handle_overlay_key(key_code, &characters, modifiers) {
+                self.redraw();
+                return;
+            }
+
             let Some(key) = decode(key_code, &characters, modifiers) else { return };
             let config = *self.ivars().key_config.borrow();
             let Some(bytes) = crate::keys::encode(&key, modifiers, config) else { return };
@@ -421,6 +434,104 @@ impl MicaView {
             .as_ref()
             .map(|s| s.title().to_owned())
             .unwrap_or_else(|| "Mica".to_owned())
+    }
+
+    /// Handles the Command shortcuts Mica owns.
+    ///
+    /// Returns whether the key was consumed. These are checked before overlay
+    /// input so `⌘F` still works while the palette is open.
+    fn handle_shortcut(&self, characters: &str, modifiers: Modifiers) -> bool {
+        if !modifiers.command {
+            return false;
+        }
+        let Some(surface) = self.ivars().surface.borrow_mut().as_mut().map(|s| s as *mut Surface)
+        else {
+            return false;
+        };
+        // SAFETY: the borrow ends with the statement above; nothing else on
+        // this thread touches the surface in between.
+        let surface = unsafe { &mut *surface };
+
+        match characters {
+            "p" | "P" if modifiers.shift => {
+                surface.toggle_palette();
+                true
+            }
+            "f" | "F" => {
+                surface.toggle_find();
+                true
+            }
+            "g" | "G" => {
+                // ⌘G / ⌘⇧G step through matches, as they do everywhere else on
+                // macOS.
+                surface.overlay_step(!modifiers.shift)
+            }
+            _ => false,
+        }
+    }
+
+    /// Routes a key to an open overlay. Returns whether it was consumed.
+    fn handle_overlay_key(
+        &self,
+        key_code: u16,
+        characters: &str,
+        modifiers: Modifiers,
+    ) -> bool {
+        let Some(surface) = self.ivars().surface.borrow_mut().as_mut().map(|s| s as *mut Surface)
+        else {
+            return false;
+        };
+        // SAFETY: as above.
+        let surface = unsafe { &mut *surface };
+        if !surface.overlay_has_focus() {
+            return false;
+        }
+
+        match key_code {
+            keycode::ESCAPE => {
+                surface.close_overlays();
+                true
+            }
+            keycode::RETURN | keycode::KEYPAD_ENTER => {
+                if let Some(id) = surface.overlay_accept() {
+                    if !surface.dispatch(&id) {
+                        eprintln!("mica: action `{id}` is not implemented yet");
+                    }
+                }
+                true
+            }
+            keycode::DELETE => {
+                surface.overlay_backspace();
+                true
+            }
+            keycode::DOWN => {
+                surface.overlay_step(true);
+                true
+            }
+            keycode::UP => {
+                surface.overlay_step(false);
+                true
+            }
+            _ => {
+                // Control combinations are not text; swallowing them silently
+                // would make Ctrl-C inside a palette do nothing at all rather
+                // than closing it.
+                if modifiers.control || modifiers.command {
+                    if modifiers.control && characters.eq_ignore_ascii_case("c") {
+                        surface.close_overlays();
+                        return true;
+                    }
+                    return false;
+                }
+                let mut consumed = false;
+                for ch in characters.chars() {
+                    if surface.overlay_char(ch) {
+                        consumed = true;
+                    }
+                }
+                consumed
+            }
+        }
     }
 
     /// The current selection, for Copy.
