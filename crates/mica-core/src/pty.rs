@@ -377,17 +377,45 @@ impl Drop for Pty {
         if self.reaped.is_some() {
             return;
         }
-        // Hang up, then reap. Closing the master alone leaves a shell blocked
-        // on read and the process table holding a zombie.
+        // Hang up, then *actually reap*. Closing the master alone leaves a
+        // shell blocked on read; a single non-blocking `waitpid` leaves a
+        // zombie, because the child has not finished exiting yet at the moment
+        // the window closes. Fifty closed tabs would mean fifty zombies for the
+        // life of the application.
+        self.signal_group(libc::SIGHUP);
+
+        // Bounded poll: a shell handles SIGHUP in microseconds, but a wedged
+        // one must not hang the main thread while a window closes.
+        const ATTEMPTS: u32 = 40;
+        const INTERVAL: std::time::Duration = std::time::Duration::from_millis(5);
+        for _ in 0..ATTEMPTS {
+            match self.try_wait() {
+                Ok(Some(_)) | Err(_) => return,
+                Ok(None) => std::thread::sleep(INTERVAL),
+            }
+        }
+
+        // It ignored the hangup. SIGKILL cannot be ignored, so the blocking
+        // wait that follows is guaranteed to terminate.
+        self.signal_group(libc::SIGKILL);
+        let _ = self.wait();
+    }
+}
+
+impl Pty {
+    /// Signals the child's foreground process group, falling back to the child
+    /// itself. The group matters: a shell running `make -j8` has children of
+    /// its own, and signalling only the shell orphans them.
+    fn signal_group(&self, signal: libc::c_int) {
         unsafe {
             let pgrp = libc::tcgetpgrp(self.master.as_raw_fd());
             if pgrp > 0 {
-                libc::killpg(pgrp, libc::SIGHUP);
-            } else {
-                libc::kill(self.pid, libc::SIGHUP);
+                libc::killpg(pgrp, signal);
             }
+            // Always signal the child too: `tcgetpgrp` reports the *foreground*
+            // group, which is not the shell's own group while a job is running.
+            libc::kill(self.pid, signal);
         }
-        let _ = self.try_wait();
     }
 }
 

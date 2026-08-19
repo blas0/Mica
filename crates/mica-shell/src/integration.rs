@@ -77,13 +77,7 @@ pub fn generate(shell: Shell, root: &Path) -> io::Result<Integration> {
 
     match shell {
         Shell::Zsh => {
-            // The user's real ZDOTDIR, so our generated .zshrc can chain to it.
-            // `$HOME` is the default when it is unset, which is what zsh does.
-            let user_zdotdir = std::env::var("ZDOTDIR")
-                .ok()
-                .filter(|s| !s.is_empty())
-                .or_else(|| std::env::var("HOME").ok())
-                .unwrap_or_default();
+            let user_zdotdir = user_zdotdir();
 
             std::fs::write(root.join("mica.zsh"), ZSH_INTEGRATION)?;
             std::fs::write(root.join(".zshrc"), zsh_rc(root))?;
@@ -122,6 +116,31 @@ pub fn generate(shell: Shell, root: &Path) -> io::Result<Integration> {
         env.push(("MICA_SHELL_INTEGRATION".into(), "1".into()));
     }
     Ok(Integration { root: root.to_path_buf(), env })
+}
+
+/// The user's *real* `ZDOTDIR`, to chain to.
+///
+/// The subtlety is nesting. Mica sets `ZDOTDIR` to a temporary directory it
+/// deletes when the session ends, so a Mica launched from inside another Mica
+/// would inherit that path and chain to a directory that vanishes when the
+/// outer window closes — leaving the inner shell with no configuration and no
+/// clue why. `MICA_SHELL_INTEGRATION` marks that case; when it is set, the
+/// inherited `ZDOTDIR` is ours, and the real one is in `MICA_USER_ZDOTDIR`.
+///
+/// `$HOME` is the fallback, which is what zsh itself does when `ZDOTDIR` is
+/// unset.
+fn user_zdotdir() -> String {
+    let nested = std::env::var_os("MICA_SHELL_INTEGRATION").is_some();
+    let inherited = if nested {
+        // Skip our own generated directory and take the one it was chaining to.
+        std::env::var("MICA_USER_ZDOTDIR").ok()
+    } else {
+        std::env::var("ZDOTDIR").ok()
+    };
+    inherited
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("HOME").ok())
+        .unwrap_or_default()
 }
 
 /// The generated `.zshrc`: source ours, then hand control to the user's.
@@ -344,6 +363,59 @@ mod tests {
         assert!(dir.join("mica.zsh").exists());
         assert!(dir.join(".zshenv").exists(), "a user's .zshenv would be skipped");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_nested_session_chains_to_the_real_configuration_not_the_outer_temp_dir() {
+        // Running Mica inside Mica: the inherited ZDOTDIR is the outer
+        // session's temporary directory, which is deleted when that window
+        // closes. Chaining to it would leave the inner shell unconfigured.
+        //
+        // The variables are process-global, so this test manipulates and
+        // restores them rather than running in parallel with others that read
+        // them; `user_zdotdir` is pure apart from the environment.
+        let previous_marker = std::env::var_os("MICA_SHELL_INTEGRATION");
+        let previous_zdotdir = std::env::var_os("ZDOTDIR");
+        let previous_user = std::env::var_os("MICA_USER_ZDOTDIR");
+
+        unsafe {
+            std::env::set_var("MICA_SHELL_INTEGRATION", "1");
+            std::env::set_var("ZDOTDIR", "/tmp/mica-outer-session-temp");
+            std::env::set_var("MICA_USER_ZDOTDIR", "/Users/someone");
+        }
+        assert_eq!(
+            user_zdotdir(),
+            "/Users/someone",
+            "a nested session chained to the outer session's temporary directory"
+        );
+
+        // Not nested: the inherited ZDOTDIR is genuinely the user's.
+        unsafe {
+            std::env::remove_var("MICA_SHELL_INTEGRATION");
+            std::env::set_var("ZDOTDIR", "/Users/someone/.config/zsh");
+        }
+        assert_eq!(user_zdotdir(), "/Users/someone/.config/zsh");
+
+        // Unset: zsh's own default is $HOME.
+        unsafe {
+            std::env::remove_var("ZDOTDIR");
+        }
+        assert_eq!(user_zdotdir(), std::env::var("HOME").unwrap_or_default());
+
+        unsafe {
+            match previous_marker {
+                Some(v) => std::env::set_var("MICA_SHELL_INTEGRATION", v),
+                None => std::env::remove_var("MICA_SHELL_INTEGRATION"),
+            }
+            match previous_zdotdir {
+                Some(v) => std::env::set_var("ZDOTDIR", v),
+                None => std::env::remove_var("ZDOTDIR"),
+            }
+            match previous_user {
+                Some(v) => std::env::set_var("MICA_USER_ZDOTDIR", v),
+                None => std::env::remove_var("MICA_USER_ZDOTDIR"),
+            }
+        }
     }
 
     #[test]

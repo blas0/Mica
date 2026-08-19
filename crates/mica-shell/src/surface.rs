@@ -35,8 +35,6 @@ pub struct Surface {
     /// Kept alive for the lifetime of the session: the generated ZDOTDIR is
     /// deleted when this is dropped.
     _integration: Integration,
-    /// Kept so the session can be respawned with a wakeup installed.
-    pty_config: PtyConfig,
     scale: f32,
     viewport: (u32, u32),
     focused: bool,
@@ -90,11 +88,18 @@ impl From<std::io::Error> for SurfaceError {
 impl Surface {
     /// Opens a surface: installs terminfo, generates shell integration, spawns
     /// the shell, and builds the renderer.
+    ///
+    /// `wakeup` is fired by the PTY reader thread when output arrives. It has
+    /// to be supplied **here**, because the reader thread is started inside
+    /// `Session::spawn` — an earlier version installed it afterwards by
+    /// replacing the session, which spawned the user's shell twice and ran
+    /// their rc files twice with it.
     pub fn open(
         settings: Settings,
         viewport: (u32, u32),
         scale: f32,
         integration_root: PathBuf,
+        wakeup: Option<mica_core::pty::Wakeup>,
     ) -> Result<Surface, SurfaceError> {
         let fonts = FontSet::resolve(&settings.font_family, settings.font_size, scale);
         let metrics = fonts.metrics();
@@ -130,11 +135,10 @@ impl Surface {
         )
         .map_err(SurfaceError::Theme)?;
 
-        let session = Session::spawn(&settings, config.clone())?;
+        let session = Session::spawn_with_wakeup(&settings, config, wakeup)?;
 
         Ok(Surface {
             session,
-            pty_config: config,
             atlas,
             renderer,
             material,
@@ -147,25 +151,6 @@ impl Surface {
             palette: Palette::new(default_actions(&theme_ids())),
             find: Find::new(),
         })
-    }
-
-    /// Restarts the session with a wakeup installed.
-    ///
-    /// The reader thread is created inside `Session::spawn`, so the wakeup has
-    /// to be present before that happens — which means replacing the session
-    /// rather than patching it. Called once, immediately after `open`, before
-    /// anything has been typed.
-    pub fn install_wakeup(&mut self, wakeup: mica_core::pty::Wakeup) {
-        let (cols, rows) = self.session.dimensions();
-        let mut config = self.pty_config.clone();
-        config.cols = cols;
-        config.rows = rows;
-        if let Ok(session) =
-            Session::spawn_with_wakeup(&self.settings, config, Some(wakeup))
-        {
-            self.session = session;
-            self.renderer.scheduler().request(Reason::Damage);
-        }
     }
 
     pub fn palette(&self) -> &Palette {
@@ -624,7 +609,7 @@ mod tests {
     }
 
     fn surface(name: &str) -> Surface {
-        Surface::open(Settings::default(), (800, 480), 2.0, temp_root(name))
+        Surface::open(Settings::default(), (800, 480), 2.0, temp_root(name), None)
             .expect("a surface should open on this machine")
     }
 

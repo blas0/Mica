@@ -198,14 +198,12 @@ impl AppDelegate {
             (bounds.size.height * scale as f64).round() as u32,
         );
 
-        match Surface::open(settings, viewport, scale, integration_root(index)) {
-            Ok(mut surface) => {
-                // The wakeup has to exist before the reader thread starts, so
-                // it is installed by replacing the session rather than by
-                // patching it afterwards.
-                surface.install_wakeup(view.wakeup());
-                view.attach(surface);
-            }
+        // The wakeup goes in at construction: the reader thread starts inside
+        // `Session::spawn`, so installing it afterwards would mean respawning
+        // the shell.
+        match Surface::open(settings, viewport, scale, integration_root(index), Some(view.wakeup()))
+        {
+            Ok(surface) => view.attach(surface),
             Err(error) => {
                 eprintln!("mica: could not open a terminal: {error}");
                 return;
