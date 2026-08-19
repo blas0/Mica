@@ -5,5 +5,20 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
+build = "build.rs"
 
+# Metal only. No AppKit: `mica-shell` owns the window and hands this crate a
+# CAMetalLayer, which is what lets the renderer be exercised headlessly.
 [dependencies]
+mica-core.workspace = true
+mica-atlas.workspace = true
+objc2 = { workspace = true }
+objc2-foundation = { workspace = true, features = ["NSString", "NSValue", "NSGeometry"] }
+objc2-metal = { workspace = true, features = [
+    "MTLDevice", "MTLCommandQueue", "MTLCommandBuffer", "MTLRenderCommandEncoder",
+    "MTLRenderPipeline", "MTLRenderPass", "MTLLibrary", "MTLBuffer", "MTLTexture",
+    "MTLResource", "MTLPixelFormat", "MTLSampler", "MTLDrawable", "MTLTypes",
+    "MTLVertexDescriptor", "MTLBlitCommandEncoder", "MTLCommandEncoder",
+] }
+objc2-quartz-core = { workspace = true, features = ["CALayer", "CAMetalLayer", "CATransaction", "objc2-metal"] }
+objc2-core-foundation = { workspace = true, features = ["CFCGTypes"] }
