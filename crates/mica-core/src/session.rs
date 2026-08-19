@@ -44,12 +44,25 @@ pub struct Session {
 
 impl Session {
     pub fn spawn(settings: &Settings, config: PtyConfig) -> io::Result<Session> {
+        Session::spawn_with_wakeup(settings, config, None)
+    }
+
+    /// The same, with a callback the reader thread fires when output arrives.
+    ///
+    /// The window layer passes one that hops to the main thread, so the UI
+    /// pumps because the PTY produced something rather than because a timer
+    /// went off.
+    pub fn spawn_with_wakeup(
+        settings: &Settings,
+        config: PtyConfig,
+        wakeup: Option<crate::pty::Wakeup>,
+    ) -> io::Result<Session> {
         let (cols, rows) = (config.cols.max(1), config.rows.max(1));
         let pty = Pty::spawn(&config)?;
         // 256 chunks of up to 64 KiB is roughly 16 MB of slack before the
         // reader blocks — enough to absorb a burst, small enough that a
         // runaway process cannot exhaust memory.
-        let rx = pty.reader(256)?;
+        let rx = pty.reader_with_wakeup(256, wakeup)?;
         Ok(Session {
             core: Backend::new(cols, rows, settings.scrollback),
             pty,

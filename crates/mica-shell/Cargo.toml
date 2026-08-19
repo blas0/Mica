@@ -6,8 +6,26 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[lib]
+name = "mica_shell"
+path = "src/lib.rs"
+
 [[bin]]
 name = "mica"
 path = "src/main.rs"
 
 [dependencies]
+mica-core.workspace = true
+mica-atlas.workspace = true
+mica-gpu.workspace = true
+objc2.workspace = true
+objc2-foundation = { workspace = true, features = ["NSString", "NSGeometry", "NSNotification", "NSThread", "NSObjCRuntime"] }
+objc2-app-kit = { workspace = true, features = [
+    "NSApplication", "NSWindow", "NSView", "NSResponder", "NSEvent", "NSMenu",
+    "NSMenuItem", "NSRunningApplication", "NSGraphics", "NSScreen", "NSPasteboard",
+    "NSColor", "NSTextInputClient", "NSText",
+] }
+objc2-metal = { workspace = true, features = ["MTLTexture", "MTLDevice", "MTLDrawable", "MTLPixelFormat", "MTLResource"] }
+objc2-quartz-core = { workspace = true, features = ["CALayer", "CAMetalLayer", "CATransaction", "objc2-metal"] }
+objc2-core-foundation = { workspace = true, features = ["CFCGTypes"] }
+libc.workspace = true

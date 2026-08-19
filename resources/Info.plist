@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>Mica</string>
+	<key>CFBundleDisplayName</key>
+	<string>Mica</string>
+	<key>CFBundleIdentifier</key>
+	<string>dev.mica.Mica</string>
+	<key>CFBundleExecutable</key>
+	<string>mica</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSSupportsAutomaticGraphicsSwitching</key>
+	<true/>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.developer-tools</string>
+
+	<!-- A terminal has to declare these so that its *child processes* can
+	     request the permissions. Without them, a program run inside Mica that
+	     asks for the camera or the microphone is denied with no prompt, and
+	     the user has no way to tell why. The wording names Mica because the
+	     system attributes the request to the app that declared it. -->
+	<key>NSCameraUsageDescription</key>
+	<string>A program running in Mica wants to use the camera.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>A program running in Mica wants to use the microphone.</string>
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>A program running in Mica wants to access your Desktop folder.</string>
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>A program running in Mica wants to access your Documents folder.</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>A program running in Mica wants to access your Downloads folder.</string>
+	<key>NSRemovableVolumesUsageDescription</key>
+	<string>A program running in Mica wants to access files on a removable volume.</string>
+	<key>NSNetworkVolumesUsageDescription</key>
+	<string>A program running in Mica wants to access files on a network volume.</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>A program running in Mica wants to control another application.</string>
+	<key>NSSystemAdministrationUsageDescription</key>
+	<string>A program running in Mica wants administrative access.</string>
+</dict>
+</plist>

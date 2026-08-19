@@ -444,7 +444,7 @@ mod tests {
         let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
 
         let mut asked = 0;
-        let mut lookup = |a: &mut Atlas, asked: &mut i32| {
+        let lookup = |a: &mut Atlas, asked: &mut i32| {
             a.glyph(key, || {
                 *asked += 1;
                 Some(family.to_owned())

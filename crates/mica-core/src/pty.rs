@@ -290,14 +290,35 @@ impl Pty {
     /// queue turns that into unbounded memory. Back-pressure onto the PTY is
     /// the correct behaviour — it is what a real terminal does.
     pub fn reader(&self, buffer_chunks: usize) -> io::Result<Receiver<PtyEvent>> {
+        self.reader_with_wakeup(buffer_chunks, None)
+    }
+
+    /// The same, plus a callback fired after every chunk is queued.
+    ///
+    /// This is what lets the UI be genuinely event-driven rather than polled.
+    /// Without it the only way for the main thread to notice new output is to
+    /// ask on a timer — which works, but means an idle terminal wakes the CPU
+    /// hundreds of times a second to be told nothing happened. The callback
+    /// runs on the reader thread and must therefore do the smallest possible
+    /// thing: signal the main thread and return.
+    pub fn reader_with_wakeup(
+        &self,
+        buffer_chunks: usize,
+        wakeup: Option<Wakeup>,
+    ) -> io::Result<Receiver<PtyEvent>> {
         let (tx, rx) = mpsc::sync_channel(buffer_chunks.max(1));
         let master = Arc::clone(&self.master);
         std::thread::Builder::new()
             .name("mica-pty-reader".to_owned())
-            .spawn(move || read_loop(master, tx))?;
+            .spawn(move || read_loop(master, tx, wakeup))?;
         Ok(rx)
     }
 }
+
+/// Fired on the reader thread whenever output is available.
+///
+/// Must be cheap and must not block: it runs between a read and the next one.
+pub type Wakeup = Arc<dyn Fn() + Send + Sync>;
 
 /// What the reader thread reports.
 #[derive(Debug)]
@@ -309,7 +330,12 @@ pub enum PtyEvent {
     Error(io::Error),
 }
 
-fn read_loop(master: Arc<OwnedFd>, tx: SyncSender<PtyEvent>) {
+fn read_loop(master: Arc<OwnedFd>, tx: SyncSender<PtyEvent>, wakeup: Option<Wakeup>) {
+    let signal = || {
+        if let Some(wakeup) = &wakeup {
+            wakeup();
+        }
+    };
     // 64 KiB matches the typical PTY buffer; larger reads mostly return short.
     let mut buf = vec![0u8; 64 * 1024];
     loop {
@@ -320,10 +346,12 @@ fn read_loop(master: Arc<OwnedFd>, tx: SyncSender<PtyEvent>) {
             if tx.send(PtyEvent::Output(buf[..n as usize].to_vec())).is_err() {
                 return; // the consumer went away; so do we
             }
+            signal();
             continue;
         }
         if n == 0 {
             let _ = tx.send(PtyEvent::Hangup);
+            signal();
             return;
         }
         let err = io::Error::last_os_error();
@@ -332,10 +360,12 @@ fn read_loop(master: Arc<OwnedFd>, tx: SyncSender<PtyEvent>) {
             // On macOS a closed slave surfaces as EIO, not as end-of-file.
             _ if err.raw_os_error() == Some(libc::EIO) => {
                 let _ = tx.send(PtyEvent::Hangup);
+                signal();
                 return;
             }
             _ => {
                 let _ = tx.send(PtyEvent::Error(err));
+                signal();
                 return;
             }
         }
