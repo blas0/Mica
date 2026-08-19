@@ -18,7 +18,7 @@ Mica is not affiliated with Metalterm.
 ```sh
 export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:$PATH"
 
-cargo test --workspace     # 328 tests
+cargo test --workspace     # 331 tests
 ./bundle.sh release        # → target/release/Mica.app
 open target/release/Mica.app
 ```
@@ -48,6 +48,12 @@ mica-core    terminal state, PTY, OSC 133, settings, themes
 `mica-gpu` never imports AppKit. That is why three of the four crates are fully
 testable with no window server, and why the pixel tests can read a rendered
 texture back and assert on it instead of comparing screenshots.
+
+`crates/mica-core/tests/layering.rs` enforces it, along with two other rules
+that were previously only comments: `fork`/`execve` appear in `pty.rs` and
+nowhere else, and `TerminalCore` has not grown a `full_grid()`. All three were
+checked by whoever was reviewing, which is the kind of rule that holds for six
+weeks and then quietly stops.
 
 ---
 
