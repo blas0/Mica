@@ -23,7 +23,7 @@ objc2-foundation = { workspace = true, features = ["NSString", "NSGeometry", "NS
 objc2-app-kit = { workspace = true, features = [
     "NSApplication", "NSWindow", "NSView", "NSResponder", "NSEvent", "NSMenu",
     "NSMenuItem", "NSRunningApplication", "NSGraphics", "NSScreen", "NSPasteboard",
-    "NSColor", "NSTextInputClient", "NSText",
+    "NSColor", "NSTextInputClient", "NSText", "NSWorkspace",
 ] }
 objc2-metal = { workspace = true, features = ["MTLTexture", "MTLDevice", "MTLDrawable", "MTLPixelFormat", "MTLResource"] }
 objc2-quartz-core = { workspace = true, features = ["CALayer", "CAMetalLayer", "CATransaction", "objc2-metal"] }

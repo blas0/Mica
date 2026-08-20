@@ -43,13 +43,25 @@ pub struct PtyConfig {
     pub rows: u16,
 }
 
+/// The shell used when `$SHELL` is unset or relative.
+///
+/// POSIX requires this path to exist; every other shell on macOS is a
+/// convention.
+pub const ROOT_SHELL: &str = "/bin/sh";
+
 impl PtyConfig {
     /// A login shell, as a terminal is expected to start.
     pub fn for_login_shell(cols: u16, rows: u16) -> PtyConfig {
+        // `/bin/sh` is the root, not `/bin/zsh`. `$SHELL` is what the user
+        // chose and is used whenever it names an absolute path, but the
+        // fallback has to be the one program POSIX guarantees is there. A
+        // default of `/bin/zsh` is a guess about this decade's macOS, and the
+        // failure mode when the guess is wrong is a terminal that cannot open
+        // a shell at all.
         let program = std::env::var_os("SHELL")
             .map(PathBuf::from)
             .filter(|p| p.is_absolute())
-            .unwrap_or_else(|| PathBuf::from("/bin/zsh"));
+            .unwrap_or_else(|| PathBuf::from(ROOT_SHELL));
 
         // A leading `-` in argv[0] is how a shell is told it is a login shell.
         let name = program.file_name().unwrap_or_else(|| OsStr::new("sh"));
@@ -531,6 +543,9 @@ pub fn resolve_program(name: &OsStr) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    // Deliberately not `#[test] fn` further down: this belongs next to the
+    // constant it pins.
+
     use super::*;
     use std::time::{Duration, Instant};
 
@@ -655,5 +670,45 @@ mod tests {
         assert!(resolve_program(OsStr::new("sh")).is_some());
         assert_eq!(resolve_program(OsStr::new("mica-definitely-not-installed")), None);
         assert_eq!(resolve_program(OsStr::new("/bin/sh")), Some(PathBuf::from("/bin/sh")));
+    }
+}
+
+#[cfg(test)]
+mod root_shell_tests {
+    use super::*;
+
+    #[test]
+    fn the_root_shell_exists_on_this_machine() {
+        // The point of the constant is that this is the one path that is
+        // always there. If it ever is not, the fallback is worthless and the
+        // failure should be loud here rather than at the first fork.
+        assert!(
+            Path::new(ROOT_SHELL).exists(),
+            "{ROOT_SHELL} is missing — the fallback shell must be a path POSIX guarantees"
+        );
+    }
+
+    #[test]
+    fn an_absent_shell_variable_falls_back_to_the_root_shell() {
+        // `for_login_shell` reads the real environment, so this asserts the
+        // resolution rule directly rather than mutating process state, which
+        // would race every other test in this binary.
+        let resolved = |shell: Option<&str>| -> PathBuf {
+            shell
+                .map(PathBuf::from)
+                .filter(|p| p.is_absolute())
+                .unwrap_or_else(|| PathBuf::from(ROOT_SHELL))
+        };
+        assert_eq!(resolved(None), PathBuf::from("/bin/sh"));
+        assert_eq!(resolved(Some("zsh")), PathBuf::from("/bin/sh"), "a relative $SHELL is not a choice");
+        assert_eq!(resolved(Some("/bin/bash")), PathBuf::from("/bin/bash"));
+    }
+
+    #[test]
+    fn a_login_shell_is_named_with_a_leading_dash() {
+        let config = PtyConfig::for_login_shell(80, 24);
+        let argv0 = config.args[0].to_string_lossy().into_owned();
+        assert!(argv0.starts_with('-'), "argv[0] was {argv0:?}; a login shell needs the dash");
+        assert!(config.program.is_absolute());
     }
 }

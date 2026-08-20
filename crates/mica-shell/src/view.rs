@@ -18,10 +18,11 @@
 // AppKit", and dropping them would mean re-auditing every call site on each
 // objc2 upgrade. Nothing here is unsound; the warning is about redundancy.
 #![allow(unused_unsafe)]
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use objc2::rc::Retained;
 use objc2::{define_class, msg_send, DeclaredClass, MainThreadMarker, MainThreadOnly};
@@ -126,6 +127,14 @@ pub struct MicaViewState {
     /// that arrives after that point is discarded rather than dereferencing a
     /// view that is on its way out.
     pub alive: Arc<AtomicBool>,
+    /// When the last frame was drawn, for the animation clock.
+    ///
+    /// `None` until the first frame: the interval before there was a previous
+    /// frame is not zero, it is undefined, and feeding an invented `dt` to the
+    /// physics makes the caret jump on the first move after every idle period.
+    pub last_frame: Cell<Option<Instant>>,
+    /// Set while a frame continuation is already queued on the main queue.
+    pub frame_queued: Arc<AtomicBool>,
 }
 
 /// What crosses the thread boundary to the main queue.
@@ -275,6 +284,8 @@ impl MicaView {
             key_config: RefCell::new(KeyConfig::default()),
             pump_queued: Arc::new(AtomicBool::new(false)),
             alive: Arc::new(AtomicBool::new(true)),
+            last_frame: Cell::new(None),
+            frame_queued: Arc::new(AtomicBool::new(false)),
         });
         let this: Retained<MicaView> = unsafe { msg_send![super(this), initWithFrame: frame] };
         unsafe {
@@ -363,15 +374,69 @@ impl MicaView {
         events
     }
 
-    /// Draws if — and only if — the scheduler says a frame is owed.
+    /// Advances the animation clock, then draws if — and only if — the
+    /// scheduler says a frame is owed.
+    ///
+    /// The order matters: stepping the physics is what *creates* the reason to
+    /// draw for a caret in flight, so asking the scheduler first would end
+    /// every animation after one frame.
     pub fn redraw(&self) {
-        let mut borrowed = self.ivars().surface.borrow_mut();
-        let Some(surface) = borrowed.as_mut() else { return };
-        if !mica_gpu::renderer::should_draw(surface.scheduler()) {
+        {
+            let mut borrowed = self.ivars().surface.borrow_mut();
+            let Some(surface) = borrowed.as_mut() else { return };
+
+            // The interval since the last *drawn* frame, which is the only
+            // honest measure of how much the animation should have advanced.
+            let now = Instant::now();
+            let dt = match self.ivars().last_frame.get() {
+                Some(previous) => now.duration_since(previous),
+                None => std::time::Duration::ZERO,
+            };
+            surface.advance(dt);
+
+            if !mica_gpu::renderer::should_draw(surface.scheduler()) {
+                // Nothing owed. Forget the timestamp so that the next frame
+                // after an idle period starts from zero rather than being
+                // handed however many minutes the terminal sat untouched.
+                self.ivars().last_frame.set(None);
+                return;
+            }
+            self.ivars().last_frame.set(Some(now));
+        }
+        self.draw();
+        self.continue_animation();
+    }
+
+    /// Queues one more frame if anything is still animating.
+    ///
+    /// This is what turns the scheduler's re-arm into actual frames. It is a
+    /// continuation on the main queue rather than a timer: `nextDrawable`
+    /// blocks until the display is ready for another frame, so the loop runs
+    /// at the refresh rate without anything having to know what that rate is —
+    /// and when the last animation ends, the scheduler stops being dirty and
+    /// the chain simply stops.
+    fn continue_animation(&self) {
+        {
+            let mut borrowed = self.ivars().surface.borrow_mut();
+            let Some(surface) = borrowed.as_mut() else { return };
+            if !surface.scheduler().is_dirty() {
+                return;
+            }
+        }
+        if self.ivars().frame_queued.swap(true, Ordering::AcqRel) {
             return;
         }
-        drop(borrowed);
-        self.draw();
+        let payload = Box::new(WakeupPayload {
+            view: self as *const MicaView,
+            alive: Arc::clone(&self.ivars().alive),
+            queued: Arc::clone(&self.ivars().frame_queued),
+        });
+        let context = Box::into_raw(payload) as *mut c_void;
+        // SAFETY: `frame_trampoline` reconstitutes and drops the box, and runs
+        // on the main queue where dereferencing the view is sound.
+        unsafe {
+            dispatch_async_f(&raw const _dispatch_main_q, context, frame_trampoline);
+        }
     }
 
     fn draw(&self) {
@@ -584,6 +649,24 @@ extern "C" fn pump_trampoline(context: *mut c_void) {
     // `detach`, before the view goes away.
     let view = unsafe { &*payload.view };
     view.pump();
+}
+
+/// Runs on the main queue. Owns and drops the payload.
+///
+/// Deliberately calls `redraw` rather than `pump`: an animation frame has no
+/// new terminal output behind it, and reading the PTY on every one of them
+/// would turn a caret glide into a poll loop over a pipe.
+extern "C" fn frame_trampoline(context: *mut c_void) {
+    // SAFETY: `context` came from `Box::into_raw` in `continue_animation`.
+    let payload = unsafe { Box::from_raw(context as *mut WakeupPayload) };
+    payload.queued.store(false, Ordering::Release);
+    if !payload.alive.load(Ordering::Acquire) {
+        return;
+    }
+    // SAFETY: `alive` is still set, and it is only cleared on this thread in
+    // `detach`, before the view goes away.
+    let view = unsafe { &*payload.view };
+    view.redraw();
 }
 
 #[cfg(test)]

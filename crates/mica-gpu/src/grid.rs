@@ -22,6 +22,7 @@ use mica_atlas::raster::PixelFormat;
 use mica_core::backend::{CursorShape, CursorState, RowRef};
 use mica_core::cell::{Cell, CellFlags};
 use mica_core::material::{Material, Rgb, Role};
+use mica_core::motion::{CaretPresentation, TrailSample};
 use mica_core::semantic::{Block, BlockStatus};
 use mica_core::sidetable::SideTables;
 
@@ -495,23 +496,30 @@ fn glyph_instance(
 
 /// Builds the caret.
 ///
-/// Returns `None` when the caret is hidden or blinked off, so an unfocused or
-/// blink-disabled window contributes no instance and therefore no reason to
-/// redraw.
+/// Takes a [`CaretPresentation`] rather than a cell coordinate, because the
+/// caret is not on the grid: it is somewhere between two cells, possibly
+/// stretched, possibly half-faded. The physics that decides all of that lives
+/// in `mica-core::motion` and knows nothing about pixels; this function is the
+/// one place the two meet.
+///
+/// Returns `None` when the caret is hidden or fully blinked out, so an
+/// invisible caret contributes no instance and therefore no draw call.
 pub fn cursor_shape(
     cursor: CursorState,
+    caret: CaretPresentation,
     metrics: CellMetrics,
     material: &Material,
     origin: (f32, f32),
     focused: bool,
-    blink_on: bool,
 ) -> Option<ShapeInstance> {
-    if !cursor.visible || (cursor.blinking && !blink_on) {
+    if !cursor.visible || caret.alpha <= 0.004 {
         return None;
     }
     let (cw, ch) = (metrics.width as f32, metrics.height as f32);
-    let x = origin.0 + cursor.column as f32 * cw;
-    let y = origin.1 + cursor.line as f32 * ch;
+    // Fractional cell coordinates: this is the sub-cell interpolation, and it
+    // is the whole reason the caret glides rather than stepping.
+    let x = origin.0 + caret.position[0] * cw;
+    let y = origin.1 + caret.position[1] * ch;
 
     let (size, offset) = match cursor.shape {
         CursorShape::Block => ([cw, ch], [0.0, 0.0]),
@@ -522,18 +530,76 @@ pub fn cursor_shape(
         CursorShape::Bar => ([(cw / 6.0).max(1.0), ch], [0.0, 0.0]),
     };
 
+    // Squash scales about the caret's centre, so a stretched caret grows in
+    // both directions rather than sliding off its own position.
+    let scaled = [size[0] * caret.scale[0], size[1] * caret.scale[1]];
+    let recentre = [(size[0] - scaled[0]) * 0.5, (size[1] - scaled[1]) * 0.5];
+
+    // An unfocused window shows a hollow caret in most terminals; here it is
+    // the same shape at low alpha, which reads the same and costs one pipeline
+    // instead of two.
+    let focus_alpha = if focused { 1.0 } else { 0.35 };
+
     Some(ShapeInstance {
-        origin: [x + offset[0], y + offset[1]],
-        size,
-        // An unfocused window shows a hollow caret in most terminals; here it
-        // is the same shape at low alpha, which reads the same and costs one
-        // pipeline instead of two.
-        color: Rgba::with_alpha(material.role(Role::Accent), if focused { 1.0 } else { 0.35 }),
+        origin: [x + offset[0] + recentre[0], y + offset[1] + recentre[1]],
+        size: scaled,
+        color: Rgba::with_alpha(material.role(Role::Accent), focus_alpha * caret.alpha),
         radius: 1.0,
-        softness: 0.0,
+        softness: caret.softness,
         _pad: 0.0,
     })
 }
+
+/// Builds the caret's wake.
+///
+/// One instance per live trail sample, appended to `out`. An unmoving caret
+/// has no samples and this appends nothing, which is what keeps the decay
+/// pipeline free when it is not in use.
+pub fn caret_decay<'a>(
+    cursor: CursorState,
+    samples: impl Iterator<Item = &'a TrailSample>,
+    metrics: CellMetrics,
+    material: &Material,
+    origin: (f32, f32),
+    out: &mut Vec<DecayInstance>,
+) {
+    if !cursor.visible {
+        return;
+    }
+    let (cw, ch) = (metrics.width as f32, metrics.height as f32);
+    let (size, offset) = match cursor.shape {
+        CursorShape::Block => ([cw, ch], [0.0, 0.0]),
+        CursorShape::Underline => {
+            let thickness = (ch / 8.0).max(1.0);
+            ([cw, thickness], [0.0, ch - thickness])
+        }
+        CursorShape::Bar => ([(cw / 6.0).max(1.0), ch], [0.0, 0.0]),
+    };
+
+    for sample in samples {
+        // The shader fades by age as well, but the alpha is pre-attenuated
+        // here so a trail never competes with the caret itself for attention.
+        let alpha = (1.0 - sample.age) * TRAIL_PEAK_ALPHA;
+        out.push(DecayInstance {
+            origin: [
+                origin.0 + sample.position[0] * cw + offset[0],
+                origin.1 + sample.position[1] * ch + offset[1],
+            ],
+            size,
+            direction: sample.direction,
+            color: Rgba::with_alpha(material.role(Role::Accent), alpha),
+            age: sample.age,
+            radius: 1.0,
+            _pad: 0.0,
+        });
+    }
+}
+
+/// How opaque the freshest trail sample is allowed to be.
+///
+/// Well under the caret's own alpha on purpose: a wake that reads as bright as
+/// the caret stops being a wake and becomes a row of duplicate carets.
+const TRAIL_PEAK_ALPHA: f32 = 0.34;
 
 /// Builds the gutter marks for the visible command blocks.
 ///
@@ -801,32 +867,38 @@ mod tests {
         assert_eq!(buffers.glyphs.capacity(), capacity, "clear() released the buffer");
     }
 
+    /// A caret sitting still and fully visible at the given cell.
+    fn at_rest(column: f32, line: f32) -> CaretPresentation {
+        CaretPresentation {
+            position: [column, line],
+            scale: [1.0, 1.0],
+            softness: 0.0,
+            alpha: 1.0,
+        }
+    }
+
     #[test]
     fn a_hidden_cursor_produces_no_shape() {
         let m = material();
         let metrics = atlas().metrics();
         let mut cursor = CursorState::default();
         cursor.visible = false;
-        assert!(cursor_shape(cursor, metrics, &m, (0.0, 0.0), true, true).is_none());
+        assert!(cursor_shape(cursor, at_rest(0.0, 0.0), metrics, &m, (0.0, 0.0), true).is_none());
     }
 
     #[test]
-    fn a_blinked_off_cursor_produces_no_shape() {
+    fn a_blinked_out_caret_produces_no_shape() {
+        // Alpha rather than a boolean, because the blink now fades: the
+        // instance has to disappear at the bottom of the fade and not before,
+        // or the caret's last visible frame is a faint ghost that never clears.
         let m = material();
         let metrics = atlas().metrics();
-        let cursor = CursorState { blinking: true, ..CursorState::default() };
-        assert!(cursor_shape(cursor, metrics, &m, (0.0, 0.0), true, false).is_none());
-        assert!(cursor_shape(cursor, metrics, &m, (0.0, 0.0), true, true).is_some());
-    }
+        let cursor = CursorState::default();
+        let faded = |alpha| CaretPresentation { alpha, ..at_rest(0.0, 0.0) };
 
-    #[test]
-    fn a_non_blinking_cursor_ignores_the_blink_phase() {
-        // Otherwise `cursor_blink = false` would produce an invisible caret
-        // half the time, which is a very confusing bug to be told about.
-        let m = material();
-        let metrics = atlas().metrics();
-        let cursor = CursorState { blinking: false, ..CursorState::default() };
-        assert!(cursor_shape(cursor, metrics, &m, (0.0, 0.0), true, false).is_some());
+        assert!(cursor_shape(cursor, faded(0.0), metrics, &m, (0.0, 0.0), true).is_none());
+        assert!(cursor_shape(cursor, faded(0.5), metrics, &m, (0.0, 0.0), true).is_some());
+        assert!(cursor_shape(cursor, faded(1.0), metrics, &m, (0.0, 0.0), true).is_some());
     }
 
     #[test]
@@ -835,11 +907,11 @@ mod tests {
         let metrics = atlas().metrics();
         let at = |shape| {
             cursor_shape(
-                CursorState { shape, blinking: false, ..CursorState::default() },
+                CursorState { shape, ..CursorState::default() },
+                at_rest(0.0, 0.0),
                 metrics,
                 &m,
                 (0.0, 0.0),
-                true,
                 true,
             )
             .unwrap()
@@ -856,29 +928,144 @@ mod tests {
     }
 
     #[test]
-    fn the_cursor_lands_on_its_cell() {
+    fn the_caret_lands_where_the_physics_put_it_not_where_the_cursor_is() {
+        // The caret's cell and the terminal's cursor cell are different things
+        // while an animation is in flight. Reading `cursor.column` here was
+        // the old behaviour and would make every motion style a no-op.
         let m = material();
         let metrics = atlas().metrics();
-        let cursor = CursorState {
-            line: 3,
-            column: 7,
-            blinking: false,
-            ..CursorState::default()
+        let cursor = CursorState { line: 3, column: 7, ..CursorState::default() };
+        let shape =
+            cursor_shape(cursor, at_rest(2.0, 1.0), metrics, &m, (10.0, 20.0), true).unwrap();
+        assert_eq!(shape.origin[0], 10.0 + 2.0 * metrics.width as f32);
+        assert_eq!(shape.origin[1], 20.0 + 1.0 * metrics.height as f32);
+    }
+
+    #[test]
+    fn a_caret_between_two_cells_is_drawn_between_them() {
+        let m = material();
+        let metrics = atlas().metrics();
+        let cursor = CursorState::default();
+        let left = cursor_shape(cursor, at_rest(4.0, 0.0), metrics, &m, (0.0, 0.0), true).unwrap();
+        let half = cursor_shape(cursor, at_rest(4.5, 0.0), metrics, &m, (0.0, 0.0), true).unwrap();
+        let right = cursor_shape(cursor, at_rest(5.0, 0.0), metrics, &m, (0.0, 0.0), true).unwrap();
+
+        assert!(half.origin[0] > left.origin[0] && half.origin[0] < right.origin[0]);
+        assert_eq!(half.origin[0] - left.origin[0], metrics.width as f32 * 0.5);
+    }
+
+    #[test]
+    fn a_squashed_caret_keeps_its_centre() {
+        // Scaling from the origin instead of the centre makes a stretching
+        // caret appear to lunge forward, which reads as a jump rather than a
+        // squash.
+        let m = material();
+        let metrics = atlas().metrics();
+        let cursor = CursorState::default();
+        let centre = |shape: &ShapeInstance| {
+            [shape.origin[0] + shape.size[0] * 0.5, shape.origin[1] + shape.size[1] * 0.5]
         };
-        let shape = cursor_shape(cursor, metrics, &m, (10.0, 20.0), true, true).unwrap();
-        assert_eq!(shape.origin[0], 10.0 + 7.0 * metrics.width as f32);
-        assert_eq!(shape.origin[1], 20.0 + 3.0 * metrics.height as f32);
+
+        let plain = cursor_shape(cursor, at_rest(4.0, 2.0), metrics, &m, (0.0, 0.0), true).unwrap();
+        let squashed = cursor_shape(
+            cursor,
+            CaretPresentation { scale: [1.6, 0.625], ..at_rest(4.0, 2.0) },
+            metrics,
+            &m,
+            (0.0, 0.0),
+            true,
+        )
+        .unwrap();
+
+        assert!(squashed.size[0] > plain.size[0] && squashed.size[1] < plain.size[1]);
+        let (a, b) = (centre(&plain), centre(&squashed));
+        assert!((a[0] - b[0]).abs() < 0.01 && (a[1] - b[1]).abs() < 0.01, "{a:?} vs {b:?}");
+    }
+
+    #[test]
+    fn softness_reaches_the_instance_the_shader_reads() {
+        let m = material();
+        let metrics = atlas().metrics();
+        let shape = cursor_shape(
+            CursorState::default(),
+            CaretPresentation { softness: 0.6, ..at_rest(0.0, 0.0) },
+            metrics,
+            &m,
+            (0.0, 0.0),
+            true,
+        )
+        .unwrap();
+        assert_eq!(shape.softness, 0.6);
     }
 
     #[test]
     fn an_unfocused_cursor_is_dimmer_but_still_present() {
         let m = material();
         let metrics = atlas().metrics();
-        let cursor = CursorState { blinking: false, ..CursorState::default() };
-        let focused = cursor_shape(cursor, metrics, &m, (0.0, 0.0), true, true).unwrap();
-        let unfocused = cursor_shape(cursor, metrics, &m, (0.0, 0.0), false, true).unwrap();
+        let cursor = CursorState::default();
+        let focused = cursor_shape(cursor, at_rest(0.0, 0.0), metrics, &m, (0.0, 0.0), true).unwrap();
+        let unfocused =
+            cursor_shape(cursor, at_rest(0.0, 0.0), metrics, &m, (0.0, 0.0), false).unwrap();
         assert!(unfocused.color.alpha() < focused.color.alpha());
         assert!(unfocused.color.alpha() > 0);
+    }
+
+    #[test]
+    fn a_still_caret_contributes_no_decay_instances() {
+        // The trail costs nothing when it is not in use — the property that
+        // lets the decay pipeline exist without being paid for every frame.
+        let m = material();
+        let metrics = atlas().metrics();
+        let mut out = Vec::new();
+        caret_decay(CursorState::default(), [].iter(), metrics, &m, (0.0, 0.0), &mut out);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn each_trail_sample_becomes_one_fading_instance() {
+        let m = material();
+        let metrics = atlas().metrics();
+        let samples = [
+            TrailSample { position: [2.0, 1.0], direction: [1.0, 0.0], age: 0.1 },
+            TrailSample { position: [3.0, 1.0], direction: [1.0, 0.0], age: 0.8 },
+        ];
+        let mut out = Vec::new();
+        caret_decay(CursorState::default(), samples.iter(), metrics, &m, (0.0, 0.0), &mut out);
+
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].origin[0], 2.0 * metrics.width as f32);
+        assert!(out[0].age < out[1].age);
+        assert!(
+            out[0].color.alpha() > out[1].color.alpha(),
+            "the older sample was not the fainter one"
+        );
+    }
+
+    #[test]
+    fn the_trail_never_outshines_the_caret() {
+        let m = material();
+        let metrics = atlas().metrics();
+        let caret =
+            cursor_shape(CursorState::default(), at_rest(0.0, 0.0), metrics, &m, (0.0, 0.0), true)
+                .unwrap();
+        let samples = [TrailSample { position: [0.0, 0.0], direction: [1.0, 0.0], age: 0.0 }];
+        let mut out = Vec::new();
+        caret_decay(CursorState::default(), samples.iter(), metrics, &m, (0.0, 0.0), &mut out);
+        assert!(
+            out[0].color.alpha() < caret.color.alpha(),
+            "the freshest trail sample is as bright as the caret itself"
+        );
+    }
+
+    #[test]
+    fn a_hidden_cursor_has_no_trail_either() {
+        let m = material();
+        let metrics = atlas().metrics();
+        let samples = [TrailSample { position: [0.0, 0.0], direction: [1.0, 0.0], age: 0.0 }];
+        let mut out = Vec::new();
+        let hidden = CursorState { visible: false, ..CursorState::default() };
+        caret_decay(hidden, samples.iter(), metrics, &m, (0.0, 0.0), &mut out);
+        assert!(out.is_empty(), "a hidden caret left a visible wake");
     }
 
     #[test]

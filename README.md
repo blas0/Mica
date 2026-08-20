@@ -96,6 +96,65 @@ arithmetically.
 
 ---
 
+## Motion
+
+Seven caret motion styles, sub-cell interpolation, a decay trail, a blink that
+fades rather than strobes, and theme cross-fades. All of it is `mica-core::motion`,
+which is a pure function of `dt` — no clock, no thread, no `Instant::now`. The
+window layer measures the interval between frames and hands it in, which is why
+`cargo test -p mica-core motion` covers all seven styles deterministically in
+under a millisecond and with no GPU.
+
+| Style | What it does |
+|---|---|
+| `snap` | No interpolation. The caret is simply in the new cell. |
+| `ease` | Exponential approach. The default. |
+| `spring` | Damped spring; overshoots slightly and comes back. |
+| `smear` | Ease, softening along the direction of travel. |
+| `squash` | Ease, stretching along travel and thinning across it, conserving area. |
+| `phosphor` | Ease with a long, slow trail. |
+| `arc` | Travels along an arc rather than a straight line. |
+
+```toml
+[motion]
+cursor = "phosphor"   # one of the seven above
+speed = 1.5           # 0.25..4.0, multiplies every rate
+intensity = 0.8       # 0..1, how strongly the style deforms
+decay = true          # the trail
+blink = false         # see below
+reduce = false        # collapse everything to a 90 ms fade
+```
+
+Three properties are enforced by tests rather than by intent:
+
+- **Every style settles, and settles exactly on target.** A style that
+  asymptotically approaches its cell is an animation that never ends, and an
+  animation that never ends is a terminal that never stops drawing. Each style
+  is stepped at a fixed `dt` until it reports itself finished, and the position
+  is then asserted to be the target *exactly*.
+- **Easing is frame-rate independent.** Interpolating by a fixed fraction per
+  frame makes the caret twice as fast at 120 Hz as at 60 Hz. The same elapsed
+  time reaches the same position at either step size, and that is a test.
+- **A long stall does not fling the caret across the screen.** A breakpoint or a
+  closed lid delivers a `dt` of seconds; an explicit integrator handed a step
+  that large diverges rather than converging. Steps are clamped, so a stall
+  makes the caret arrive late instead of arriving at infinity.
+
+**Blinking is off by default, and that is a design position rather than an
+oversight.** A blink is a change on a schedule, and a change on a schedule is
+frames — roughly one per display refresh, forever, for decoration. It is the one
+thing in `motion.rs` that never settles, and the test asserting so exists to
+stop someone quietly optimising it into a caret that has stopped blinking. Turn
+it on with `blink = true` or `⌘⇧P → Toggle Caret Blink`, knowing what it costs.
+
+Reduce Motion collapses all of it — travel, deformation, trail, and the theme
+cross-fade — to a single 90 ms fade. The app setting and the macOS system
+preference are OR'd: someone who has asked the whole machine for less motion has
+not asked this one app for an exception. The system preference is read when a
+window opens rather than observed live.
+
+---
+
 ## Status against BUILD-ORDER.md
 
 | Phase | State |
@@ -145,6 +204,9 @@ them and says so on stderr rather than appearing to work.
 | `⌘N` | new window (a tab, via native tabbing) |
 | `⌘C` / `⌘V` | copy selection / paste, bracketed |
 | `⎋` | close an overlay |
+
+`⌘⇧P` also carries `Caret Motion · Next Style`, `Toggle Caret Decay`,
+`Toggle Caret Blink`, and `Toggle Reduce Motion`.
 
 Search is literal and smart-case: a lowercase query matches case-insensitively,
 a query containing an uppercase letter matches exactly. Regex is the obvious

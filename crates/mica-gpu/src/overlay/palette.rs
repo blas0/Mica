@@ -47,8 +47,10 @@ pub fn default_actions(theme_ids: &[String]) -> Vec<Action> {
         Action::new("blocks.previous", "Previous Command Block", "⌘↑"),
         Action::new("blocks.fold", "Fold Command Block", ""),
         Action::new("settings.open", "Open Settings", "⌘,"),
-        Action::new("settings.fx.cursor", "Toggle Caret Motion", ""),
+        Action::new("settings.fx.cursor", "Caret Motion · Next Style", ""),
         Action::new("settings.fx.decay", "Toggle Caret Decay", ""),
+        Action::new("settings.fx.blink", "Toggle Caret Blink", ""),
+        Action::new("settings.fx.reduce", "Toggle Reduce Motion", ""),
         Action::new("settings.fx.blocks", "Toggle Block Gutter", ""),
         Action::new("settings.fx.depth", "Toggle Ambient Light", ""),
     ];

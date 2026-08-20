@@ -485,8 +485,14 @@ mod tests {
             blinking: false,
             ..Default::default()
         };
+        let caret = mica_core::motion::CaretPresentation {
+            position: [cursor.column as f32, cursor.line as f32],
+            scale: [1.0, 1.0],
+            softness: 0.0,
+            alpha: 1.0,
+        };
         let shape =
-            crate::grid::cursor_shape(cursor, metrics, &material, (0.0, 0.0), true, true).unwrap();
+            crate::grid::cursor_shape(cursor, caret, metrics, &material, (0.0, 0.0), true).unwrap();
         renderer.buffers().shapes.push(shape);
 
         let pixels = render(&mut renderer, &mut atlas, &material);
@@ -502,6 +508,104 @@ mod tests {
                 && (b as i32 - accent.b as i32).abs() < 60
                 && (g as i32 - accent.g as i32).abs() < 60,
             "the caret rendered as ({r},{g},{b}), expected roughly {accent:?}"
+        );
+    }
+
+    #[test]
+    fn a_sub_cell_caret_lands_between_two_cells_on_screen() {
+        // Not a unit-test restatement of the arithmetic: this renders through
+        // the real pipeline and reads the framebuffer, which is the only way
+        // to know that the sub-cell offset survives the vertex shader rather
+        // than being rounded to a cell somewhere on the way.
+        let material = material();
+        let mut atlas = atlas();
+        let metrics = atlas.metrics();
+        let mut renderer = Renderer::new(512).unwrap();
+
+        let cursor = mica_core::backend::CursorState::default();
+        let caret = mica_core::motion::CaretPresentation {
+            position: [3.5, 1.0],
+            scale: [1.0, 1.0],
+            softness: 0.0,
+            alpha: 1.0,
+        };
+        renderer.buffers().shapes.push(
+            crate::grid::cursor_shape(cursor, caret, metrics, &material, (0.0, 0.0), true).unwrap(),
+        );
+
+        let pixels = render(&mut renderer, &mut atlas, &material);
+        let accent = material.role(Role::Accent);
+        let y = metrics.height as usize + metrics.height as usize / 2;
+        let is_caret = |x: usize| {
+            let (r, g, b, _) = pixel_at(&pixels, W as usize, x, y);
+            (r as i32 - accent.r as i32).abs() < 60
+                && (g as i32 - accent.g as i32).abs() < 60
+                && (b as i32 - accent.b as i32).abs() < 60
+        };
+
+        // Half a cell to the right of column 3: the boundary between cells 3
+        // and 4 is covered, and the left edge of cell 3 is not.
+        let boundary = metrics.width as usize * 4;
+        assert!(is_caret(boundary), "the caret did not straddle the cell boundary");
+        assert!(!is_caret(metrics.width as usize * 3 + 1), "the caret snapped back to its cell");
+    }
+
+    #[test]
+    fn the_decay_trail_reaches_the_framebuffer_and_fades_with_age() {
+        // The decay pipeline gets its own shader, so it gets its own pixels.
+        // A trail that is built correctly and never drawn looks exactly like a
+        // trail that is switched off.
+        //
+        // Measured as a *difference* against the same scene without the trail:
+        // the substrate pass lays down an ambient gradient, so absolute
+        // brightness at a point says as much about where the point is as about
+        // what was drawn there. The first version of this test compared raw
+        // pixel values and concluded a nearly-dead trail sample was brighter
+        // than a fresh one.
+        let material = material();
+        let metrics = atlas().metrics();
+
+        let trail = |samples: &[mica_core::motion::TrailSample]| {
+            let mut renderer = Renderer::new(512).unwrap();
+            let mut decays = Vec::new();
+            crate::grid::caret_decay(
+                mica_core::backend::CursorState::default(),
+                samples.iter(),
+                metrics,
+                &material,
+                (0.0, 0.0),
+                &mut decays,
+            );
+            renderer.buffers().decays = decays;
+            // A fresh atlas per render: the two scenes must differ only by the
+            // trail, and an atlas carries frame state.
+            let mut atlas = atlas();
+            render(&mut renderer, &mut atlas, &material)
+        };
+
+        let samples = [
+            mica_core::motion::TrailSample { position: [2.0, 1.0], direction: [1.0, 0.0], age: 0.05 },
+            mica_core::motion::TrailSample { position: [4.0, 1.0], direction: [1.0, 0.0], age: 0.9 },
+        ];
+        let with = trail(&samples);
+        let without = trail(&[]);
+
+        let y = metrics.height as usize + metrics.height as usize / 2;
+        let delta = |x: usize| {
+            let (r, g, b, _) = pixel_at(&with, W as usize, x, y);
+            let (br, bg, bb, _) = pixel_at(&without, W as usize, x, y);
+            (r as i32 - br as i32).abs() + (g as i32 - bg as i32).abs() + (b as i32 - bb as i32).abs()
+        };
+
+        let fresh = delta(metrics.width as usize * 2 + metrics.width as usize / 2);
+        let old = delta(metrics.width as usize * 4 + metrics.width as usize / 2);
+        let empty = delta(metrics.width as usize * 8 + metrics.width as usize / 2);
+
+        assert!(fresh > 6, "the fresh trail sample did not render at all (delta {fresh})");
+        assert_eq!(empty, 0, "the trail painted a cell it has no sample in");
+        assert!(
+            old < fresh,
+            "the old sample (delta {old}) was not fainter than the fresh one (delta {fresh})"
         );
     }
 

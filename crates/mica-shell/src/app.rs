@@ -20,6 +20,7 @@ use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType,
     NSMenu, NSMenuItem, NSPasteboard, NSPasteboardTypeString, NSWindow,
     NSWindowCollectionBehavior, NSWindowDelegate, NSWindowStyleMask, NSWindowTabbingMode,
+    NSWorkspace,
 };
 use objc2_foundation::{
     NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
@@ -201,9 +202,19 @@ impl AppDelegate {
         // The wakeup goes in at construction: the reader thread starts inside
         // `Session::spawn`, so installing it afterwards would mean respawning
         // the shell.
+        let motion = mica_core::motion::MotionSettings {
+            // The app setting and the system preference are an OR, not an
+            // override: someone who has asked the whole machine for less
+            // motion has not asked this one app for an exception.
+            reduce: settings.motion.reduce || system_reduce_motion(),
+            ..settings.motion
+        };
         match Surface::open(settings, viewport, scale, integration_root(index), Some(view.wakeup()))
         {
-            Ok(surface) => view.attach(surface),
+            Ok(mut surface) => {
+                surface.set_motion(motion);
+                view.attach(surface)
+            }
             Err(error) => {
                 eprintln!("mica: could not open a terminal: {error}");
                 return;
@@ -330,6 +341,17 @@ pub fn build_menu(mtm: MainThreadMarker, delegate: &AppDelegate) -> Retained<NSM
     menubar.addItem(&window_item);
 
     menubar
+}
+
+/// Whether macOS has been asked to reduce motion.
+///
+/// Read at window open rather than observed: the preference is in System
+/// Settings, changing it is a deliberate act, and a window opened afterwards
+/// picks it up. Observing the change notification would be nicer and is not
+/// worth a notification-observer object in v0.1 — but the omission is here in
+/// writing rather than left for someone to discover.
+fn system_reduce_motion() -> bool {
+    unsafe { NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion() }
 }
 
 /// Starts the application. Does not return until it quits.

@@ -12,6 +12,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::motion::{MotionSettings, MotionStyle};
 use serde::{Deserialize, Serialize};
 
 use crate::material::DEFAULT_THEME;
@@ -40,10 +41,10 @@ pub struct Settings {
     /// Recognise progress bars in the output stream and draw them natively.
     pub substitute_progress: bool,
     pub substitute_spinner: bool,
-    /// Collapse every animation to a 90 ms fade. Also implied by the system
-    /// Reduce Motion preference, which is checked separately at runtime.
-    pub reduce_motion: bool,
-    pub cursor_blink: bool,
+    /// Caret physics, trails, blinking, and Reduce Motion. The system
+    /// preference is layered over `motion.reduce` at runtime by the shell,
+    /// which is the only layer that can see AppKit.
+    pub motion: MotionSettings,
 }
 
 impl Default for Settings {
@@ -59,8 +60,7 @@ impl Default for Settings {
             frame_cap: 0,
             substitute_progress: false,
             substitute_spinner: false,
-            reduce_motion: false,
-            cursor_blink: true,
+            motion: MotionSettings::default(),
         }
     }
 }
@@ -112,8 +112,6 @@ pub struct Renderer {
     pub substitute_progress: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub substitute_spinner: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cursor_blink: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -121,6 +119,19 @@ pub struct Renderer {
 pub struct Motion {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reduce: Option<bool>,
+    /// One of the seven [`MotionStyle`] ids. An unrecognised name is ignored
+    /// rather than rejected: a settings file written by a newer Mica should
+    /// still open in an older one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speed: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intensity: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decay: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blink: Option<bool>,
 }
 
 #[derive(Debug)]
@@ -187,15 +198,30 @@ impl Settings {
             if let Some(v) = r.substitute_spinner {
                 s.substitute_spinner = v;
             }
-            if let Some(v) = r.cursor_blink {
-                s.cursor_blink = v;
-            }
         }
         if let Some(m) = &file.motion {
             if let Some(v) = m.reduce {
-                s.reduce_motion = v;
+                s.motion.reduce = v;
+            }
+            if let Some(v) = m.cursor.as_deref().and_then(MotionStyle::from_id) {
+                s.motion.style = v;
+            }
+            if let Some(v) = m.speed {
+                s.motion.speed = v;
+            }
+            if let Some(v) = m.intensity {
+                s.motion.intensity = v;
+            }
+            if let Some(v) = m.decay {
+                s.motion.decay = v;
+            }
+            if let Some(v) = m.blink {
+                s.motion.blink = v;
             }
         }
+        // Clamped here rather than trusted: this is the boundary a
+        // hand-edited file crosses.
+        s.motion = s.motion.sanitised();
         s
     }
 
@@ -219,10 +245,17 @@ impl Settings {
                 .then_some(self.substitute_progress),
             substitute_spinner: (self.substitute_spinner != d.substitute_spinner)
                 .then_some(self.substitute_spinner),
-            cursor_blink: (self.cursor_blink != d.cursor_blink).then_some(self.cursor_blink),
         };
-        let motion =
-            Motion { reduce: (self.reduce_motion != d.reduce_motion).then_some(self.reduce_motion) };
+        let m = &self.motion;
+        let dm = &d.motion;
+        let motion = Motion {
+            reduce: (m.reduce != dm.reduce).then_some(m.reduce),
+            cursor: (m.style != dm.style).then(|| m.style.id().to_owned()),
+            speed: (m.speed != dm.speed).then_some(m.speed),
+            intensity: (m.intensity != dm.intensity).then_some(m.intensity),
+            decay: (m.decay != dm.decay).then_some(m.decay),
+            blink: (m.blink != dm.blink).then_some(m.blink),
+        };
 
         SettingsFile {
             appearance: (appearance != Appearance::default()).then_some(appearance),
@@ -354,10 +387,41 @@ mod tests {
         s.bell = Bell::Audible;
         s.font_size = 15.5;
         s.frame_cap = 60;
-        s.reduce_motion = true;
+        s.motion.reduce = true;
 
         let text = s.serialize().unwrap();
         assert_eq!(Settings::parse(&text).unwrap(), s);
+    }
+
+    #[test]
+    fn every_motion_setting_round_trips() {
+        let mut s = Settings::default();
+        s.motion = MotionSettings {
+            style: MotionStyle::Phosphor,
+            speed: 1.75,
+            intensity: 0.4,
+            decay: false,
+            blink: true,
+            reduce: true,
+        };
+        let text = s.serialize().unwrap();
+        assert!(text.contains("cursor = \"phosphor\""), "the style is not in the file:\n{text}");
+        assert_eq!(Settings::parse(&text).unwrap(), s);
+    }
+
+    #[test]
+    fn an_unknown_motion_style_falls_back_rather_than_failing_to_load() {
+        // A file written by a newer Mica must still open in an older one. The
+        // alternative is a terminal that will not start because of a caret.
+        let s = Settings::parse("[motion]\ncursor = \"tesseract\"\n").unwrap();
+        assert_eq!(s.motion.style, MotionSettings::default().style);
+    }
+
+    #[test]
+    fn a_hand_edited_file_cannot_produce_a_caret_that_never_arrives() {
+        let s = Settings::parse("[motion]\nspeed = 0.0\nintensity = 99.0\n").unwrap();
+        assert!(s.motion.speed >= 0.25, "speed survived as {}", s.motion.speed);
+        assert_eq!(s.motion.intensity, 1.0);
     }
 
     #[test]

@@ -71,12 +71,14 @@ macro_rules! bitflags_lite {
 pub mod backend;
 pub mod cell;
 pub mod material;
+pub mod motion;
 pub mod pty;
 pub mod semantic;
 pub mod session;
 pub mod settings;
 pub mod sidetable;
 
+pub use motion::{Caret, CaretPresentation, MotionSettings, MotionStyle};
 pub use cell::{Cell, CellContent, CellFlags, Color};
 pub use backend::{CursorShape, CursorState, RowRef, Selection, TerminalCore};
 pub use semantic::{Block, BlockStatus, SemanticEvent};
