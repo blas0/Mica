@@ -14,6 +14,7 @@
 
 pub mod find;
 pub mod palette;
+pub mod shortcuts;
 
 use mica_atlas::atlas::{Atlas, GlyphKey};
 use mica_atlas::fontset::Style;

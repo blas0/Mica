@@ -45,6 +45,11 @@ pub struct Settings {
     /// preference is layered over `motion.reduce` at runtime by the shell,
     /// which is the only layer that can see AppKit.
     pub motion: MotionSettings,
+    /// Keyboard bindings that differ from the defaults, as
+    /// `action id -> chord`. Stored as strings because the chord grammar
+    /// belongs to the window layer: this crate must not learn what a modifier
+    /// key is. An empty value means "deliberately unbound".
+    pub keys: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for Settings {
@@ -61,6 +66,7 @@ impl Default for Settings {
             substitute_progress: false,
             substitute_spinner: false,
             motion: MotionSettings::default(),
+            keys: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -77,6 +83,11 @@ pub struct SettingsFile {
     pub renderer: Option<Renderer>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub motion: Option<Motion>,
+    /// `action id = "chord"`. Free-form on purpose — the window layer owns the
+    /// grammar and validates it, and an entry this version does not recognise
+    /// is carried rather than rejected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keys: Option<std::collections::BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -219,6 +230,9 @@ impl Settings {
                 s.motion.blink = v;
             }
         }
+        if let Some(keys) = &file.keys {
+            s.keys = keys.clone();
+        }
         // Clamped here rather than trusted: this is the boundary a
         // hand-edited file crosses.
         s.motion = s.motion.sanitised();
@@ -262,6 +276,7 @@ impl Settings {
             window: (window != Window::default()).then_some(window),
             renderer: (renderer != Renderer::default()).then_some(renderer),
             motion: (motion != Motion::default()).then_some(motion),
+            keys: (!self.keys.is_empty()).then(|| self.keys.clone()),
         }
     }
 
@@ -391,6 +406,29 @@ mod tests {
 
         let text = s.serialize().unwrap();
         assert_eq!(Settings::parse(&text).unwrap(), s);
+    }
+
+    #[test]
+    fn key_bindings_round_trip_and_only_appear_when_set() {
+        let mut s = Settings::default();
+        assert!(!s.serialize().unwrap().contains("[keys]"), "an empty keymap was written out");
+
+        s.keys.insert("find.toggle".into(), "cmd+j".into());
+        // An empty value is how a deliberately unbound action is recorded, and
+        // it has to survive the round trip or the removal is silently undone.
+        s.keys.insert("palette.toggle".into(), String::new());
+
+        let text = s.serialize().unwrap();
+        assert!(text.contains("[keys]"), "{text}");
+        assert_eq!(Settings::parse(&text).unwrap(), s);
+    }
+
+    #[test]
+    fn an_unrecognised_binding_is_carried_rather_than_rejected() {
+        // This crate does not know the chord grammar, so it must not have an
+        // opinion about which ones are valid.
+        let s = Settings::parse("[keys]\n\"future.action\" = \"hyper+q\"\n").unwrap();
+        assert_eq!(s.keys.get("future.action").map(String::as_str), Some("hyper+q"));
     }
 
     #[test]

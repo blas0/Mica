@@ -212,10 +212,30 @@ them and says so on stderr rather than appearing to work.
 | `⌘G` / `⌘⇧G` | next / previous match |
 | `⌘N` | new window (a tab, via native tabbing) |
 | `⌘C` / `⌘V` | copy selection / paste, bracketed |
+| `⌘,` | keyboard shortcuts |
+| `⌘]` / `⌘[` | next / previous command block |
+| `⌥⌫` | delete the word to the left |
+| `⌘⌫` | delete to the start of the line |
 | `⎋` | close an overlay |
 
 `⌘⇧P` also carries `Caret Motion · Next Style`, `Toggle Caret Decay`,
 `Toggle Caret Blink`, and `Toggle Reduce Motion`.
+
+Every shortcut above except copy, paste and the deletion keys is rebindable in
+`⌘,` — arrows to move, space to capture a combination, `⌫` to unbind, `⎋` to
+close. Changes land in `[keys]` in `settings.toml`, only where they differ from
+the defaults. There is exactly one table: the window dispatches through it, the
+palette prints its accelerator column from it, and the panel edits it. Before
+that they were separate, and had already drifted — the palette advertised `⌘↓`
+for two different actions and `⌘↑` for one that had no binding at all.
+
+`⌘⌫` sends `^U`. Worth knowing what that means, because the two common shells
+disagree and it was checked rather than assumed: **bash** binds it to
+`unix-line-discard`, which deletes to the start of the line — the macOS
+behaviour. **zsh** binds it to `kill-whole-line`, which takes the whole line
+including anything right of the cursor. The difference only shows mid-line, and
+at a prompt the cursor is usually at the end. There is no escape sequence that
+means "delete to line start" in general, so the choice was `^U` or nothing.
 
 Search is literal and smart-case: a lowercase query matches case-insensitively,
 a query containing an uppercase letter matches exactly. Regex is the obvious

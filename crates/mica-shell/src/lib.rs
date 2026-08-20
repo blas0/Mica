@@ -6,8 +6,10 @@
 //! can be tested headlessly.
 
 pub mod app;
+pub mod bindings;
 pub mod keys;
 pub mod scroll;
+pub mod shortcut_panel;
 pub mod surface;
 pub mod view;
 pub mod terminfo;

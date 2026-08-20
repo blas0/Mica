@@ -41,12 +41,12 @@ pub fn default_actions(theme_ids: &[String]) -> Vec<Action> {
     let mut actions = vec![
         Action::new("session.next_tab", "Next Tab", "⌃⇥"),
         Action::new("session.previous_tab", "Previous Tab", "⌃⇧⇥"),
-        Action::new("session.scroll_bottom", "Scroll to Bottom", "⌘↓"),
+        Action::new("session.scroll_bottom", "Scroll to Bottom", ""),
         Action::new("session.clear_selection", "Clear Selection", "⎋"),
-        Action::new("blocks.next", "Next Command Block", "⌘↓"),
-        Action::new("blocks.previous", "Previous Command Block", "⌘↑"),
+        Action::new("blocks.next", "Next Command Block", ""),
+        Action::new("blocks.previous", "Previous Command Block", ""),
         Action::new("blocks.fold", "Fold Command Block", ""),
-        Action::new("settings.open", "Open Settings", "⌘,"),
+        Action::new("keys.open", "Keyboard Shortcuts", ""),
         Action::new("settings.fx.cursor", "Caret Motion · Next Style", ""),
         Action::new("settings.fx.decay", "Toggle Caret Decay", ""),
         Action::new("settings.fx.blink", "Toggle Caret Blink", ""),
@@ -126,6 +126,20 @@ impl Palette {
     pub fn close(&mut self) {
         self.open = false;
         self.query.clear();
+    }
+
+    /// Replaces every accelerator from the window layer's binding table.
+    ///
+    /// The strings used to be written here by hand, which meant the palette
+    /// and the actual key handling were two copies of the same fact. They
+    /// drifted: the palette advertised `⌘↓` for both "Scroll to Bottom" and
+    /// "Next Command Block", and `⌘↑` for an action nothing was bound to.
+    /// Taking a closure keeps this crate ignorant of what a chord is.
+    pub fn set_accelerators(&mut self, chord_for: &dyn Fn(&str) -> String) {
+        for action in &mut self.actions {
+            action.shortcut = chord_for(&action.id);
+        }
+        self.rerank();
     }
 
     pub fn set_theme_ids(&mut self, theme_ids: &[String]) {

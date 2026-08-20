@@ -18,7 +18,7 @@
 //! pressing anything.
 
 /// Modifier state, as reported by the window layer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct Modifiers {
     pub shift: bool,
     pub control: bool,
@@ -56,7 +56,7 @@ impl Modifiers {
 }
 
 /// A key, after the window layer has decoded it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Copy, PartialOrd, Ord, Hash)]
 pub enum Key {
     /// A character the keyboard layout produced. Already has dead keys and
     /// input methods applied — Mica never reimplements the keyboard layout.
