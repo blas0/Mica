@@ -82,10 +82,12 @@ impl Renderer {
         &mut self.buffers
     }
 
-    /// Copies any newly rasterised glyphs into their textures.
+    /// Stages any newly rasterised glyphs for their textures.
     ///
-    /// Called before encoding, never during: a texture cannot be written while
-    /// a pass that samples it is being encoded.
+    /// The copies themselves are encoded into the frame's command buffer by
+    /// [`GpuContext::flush_uploads`], not performed here — see `stage_upload`
+    /// for why a CPU write into the texture is not safe once frames stop
+    /// blocking.
     pub fn sync_atlas(&mut self, atlas: &mut Atlas) -> Result<(), GpuError> {
         if atlas.generation() != self.context.atlas_generation() {
             // The atlas dropped pages — a font change, a size change, an
@@ -97,7 +99,7 @@ impl Renderer {
             return Ok(());
         }
         for upload in atlas.take_uploads() {
-            self.context.upload(&upload)?;
+            self.context.stage_upload(&upload)?;
         }
         self.scheduler.request(Reason::Atlas);
         Ok(())
@@ -175,6 +177,11 @@ impl Renderer {
         uniforms: Uniforms,
         substrate: SubstrateUniforms,
     ) -> Result<(), GpuError> {
+        // Glyph copies first, on the same command buffer: within one buffer
+        // Metal orders a blit ahead of a render pass that samples the same
+        // texture, which is what makes the atlas safe to grow mid-frame.
+        self.context.flush_uploads(command_buffer)?;
+
         let descriptor = MTLRenderPassDescriptor::renderPassDescriptor();
         let attachment =
             unsafe { descriptor.colorAttachments().objectAtIndexedSubscript(0) };
@@ -266,11 +273,23 @@ impl Renderer {
         }
 
         pass!(cell_bg, &self.buffers.backgrounds, "mica.cell_bg", false);
+        // **The caret and its wake go under the text, not over it.** A block
+        // caret drawn on top is opaque, and it erases the glyph beneath it
+        // completely — measured: 79 foreground pixels in the cell without it,
+        // zero with it. That is invisible while the caret only ever sits on
+        // the empty cell after the last character. It stops being invisible
+        // the moment the caret interpolates, because it then sweeps across
+        // everything the user just typed and wipes each glyph as it passes.
+        //
+        // Terminals that draw the caret on top invert the glyph under it. That
+        // is not available here: with sub-cell motion the caret straddles two
+        // cells and there is no single glyph to invert. Underneath, the block
+        // reads as a highlight and the character stays legible.
+        pass!(decay, &self.buffers.decays, "mica.decay", false);
+        pass!(shape, &self.buffers.shapes, "mica.shapes", false);
         pass!(cell, &self.buffers.glyphs, "mica.cells", true);
         pass!(cell_rule, &self.buffers.rules, "mica.rules", false);
         pass!(block_gutter, &self.buffers.gutters, "mica.gutters", false);
-        pass!(decay, &self.buffers.decays, "mica.decay", false);
-        pass!(shape, &self.buffers.shapes, "mica.shapes", false);
         pass!(quad, &self.buffers.quads, "mica.quads", false);
         pass!(ui_text, &self.buffers.ui_text, "mica.uitext", true);
 

@@ -282,6 +282,32 @@ pub struct InstanceBuffers {
 }
 
 impl InstanceBuffers {
+    /// The grid's own instances: one per cell, rebuilt from terminal rows.
+    ///
+    /// Separated from [`InstanceBuffers::clear_transient`] because they have
+    /// different lifetimes. The render pass clears the whole target every
+    /// frame, so anything not re-emitted disappears — and the rows are only
+    /// re-emitted when the terminal reports damage. A frame with no new output
+    /// (a caret animation, for instance) must therefore keep the rows it
+    /// already has, or it paints an empty screen. It did, and typing looked
+    /// like the text was flashing away as you wrote it.
+    pub fn clear_rows(&mut self) {
+        self.backgrounds.clear();
+        self.glyphs.clear();
+        self.rules.clear();
+    }
+
+    /// Everything rebuilt from scratch every frame: the caret, its wake, the
+    /// gutter, and the overlays. These move without the grid changing, which
+    /// is exactly why they cannot be cached alongside it.
+    pub fn clear_transient(&mut self) {
+        self.gutters.clear();
+        self.shapes.clear();
+        self.decays.clear();
+        self.quads.clear();
+        self.ui_text.clear();
+    }
+
     /// Empties without releasing capacity — the reason a steady-state frame
     /// does no allocation at all.
     pub fn clear(&mut self) {

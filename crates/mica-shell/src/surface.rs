@@ -625,10 +625,34 @@ impl Surface {
     /// what changed rather than to what is on screen.
     fn build_frame(&mut self) {
         let metrics = self.atlas.metrics();
-        self.atlas.begin_frame();
-        self.renderer.buffers().clear();
+        // Only the caret, the gutter and the overlays are rebuilt
+        // unconditionally. The grid's own instances survive a frame that has
+        // nothing new to say — see below.
+        self.renderer.buffers().clear_transient();
 
-        {
+        // **A frame with no damage keeps the rows it already has.**
+        //
+        // The render pass clears the whole target, so every frame paints from
+        // nothing: an instance that is not re-emitted is gone. Rows are only
+        // emitted when the terminal reports them damaged, which is fine as
+        // long as every frame is a damage frame — and every frame was, until
+        // the caret started animating. An animation frame has no new output,
+        // so it emitted no rows, so it painted a blank screen with a caret on
+        // it. While typing, that alternates with real frames at 60 Hz and the
+        // text appears to flash away as you write it.
+        //
+        // When there *is* damage the whole grid is rebuilt rather than the
+        // damaged rows alone. Rebuilding a subset would mean holding the rest
+        // from previous frames, and those instances point into atlas slots
+        // that nothing has touched in the meantime and that eviction is free
+        // to reuse. Repainting everything keeps every glyph's use current, and
+        // costs a hash lookup per cell on frames that were going to redraw
+        // anyway.
+        if self.session.has_damage() {
+            self.atlas.begin_frame();
+            self.session.damage_all();
+            self.renderer.buffers().clear_rows();
+
             let builder = RowBuilder {
                 material: &self.display_material,
                 tables: self.session.side_tables(),
@@ -637,7 +661,7 @@ impl Surface {
             };
             // The borrow checker is doing real work here: `dirty_rows` borrows
             // the session while the atlas is borrowed mutably, so the rows are
-            // collected first. On a typical frame that is a handful of entries.
+            // collected first.
             let rows: Vec<_> = self.session.dirty_rows().collect();
             let mut buffers = std::mem::take(self.renderer.buffers());
             for row in rows {
@@ -781,6 +805,20 @@ impl Surface {
 
     /// The column the *terminal's* cursor is in, which during an animation is
     /// not where the caret is drawn.
+    /// How many trail samples the caret is currently carrying.
+    pub fn caret_trail_len(&self) -> usize {
+        self.caret.trail().count()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_damage_for_test(&self) -> bool {
+        self.session.has_damage()
+    }
+
+    pub fn cursor_line(&self) -> u16 {
+        self.session.cursor().line
+    }
+
     pub fn cursor_column(&self) -> u16 {
         self.session.cursor().column
     }
@@ -1005,6 +1043,78 @@ mod tests {
             assert!(s.dispatch(id));
             assert_eq!(read(s.motion()), before, "{id} did not toggle back");
         }
+    }
+
+    #[test]
+    fn a_frame_with_no_new_output_still_draws_the_text() {
+        // Regression test for the bug that made typing look like the text was
+        // flashing away as it was written.
+        //
+        // The render pass clears the whole target, so a frame paints only what
+        // it emits. Rows were emitted only when the terminal reported damage,
+        // which was invisible for as long as every frame was a damage frame.
+        // The caret animation broke that: an animation frame has no new
+        // output, emitted no rows, and painted a blank screen with a caret on
+        // it — at 60 Hz, alternating with real frames, while the user typed.
+        let mut s = surface("undamaged-frame");
+        s.write_input(b"echo hello");
+        for _ in 0..400 {
+            s.pump();
+            if s.cursor_column() > 4 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(s.cursor_column() > 4, "the shell never echoed anything back");
+
+        // Rendering, not just building: `clear_damage` is part of the frame,
+        // and it is what makes the *next* frame an undamaged one.
+        let frame = |s: &mut Surface| {
+            let target = s.renderer().context().offscreen_target(400, 240).unwrap();
+            s.render_to_texture(&target).unwrap();
+            s.renderer().buffers().glyphs.len()
+        };
+
+        s.advance(Duration::from_millis(8));
+        let with_output = frame(&mut s);
+        assert!(with_output > 4, "the first frame drew almost nothing: {with_output}");
+
+        // A second frame with nothing new to say. This is every animation
+        // frame, and it must still paint the screen.
+        assert!(!s.has_damage_for_test(), "the test did not reach an undamaged frame");
+        s.advance(Duration::from_millis(8));
+        let without_output = frame(&mut s);
+
+        assert_eq!(
+            without_output, with_output,
+            "a frame with no new output dropped {} of {with_output} glyphs — that \
+             is a blank screen for one frame in every two while typing",
+            with_output - without_output
+        );
+    }
+
+    #[test]
+    fn the_caret_does_not_erase_the_character_underneath_it() {
+        // A block caret drawn over the glyph is opaque and hides it. That is
+        // survivable while the caret only ever sits on the empty cell past the
+        // last character; once it interpolates it sweeps across everything
+        // just typed, wiping each glyph as it passes. The passes are ordered
+        // so the caret goes underneath — measured at 79 foreground pixels in
+        // the cell before, zero with the caret on top.
+        let order = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .join("mica-gpu/src/renderer.rs"),
+        )
+        .expect("renderer.rs");
+        let caret = order.find("pass!(shape").expect("the caret pass");
+        let text = order.find("pass!(cell,").expect("the glyph pass");
+        assert!(
+            caret < text,
+            "the caret pass is encoded after the glyph pass, so it paints over \
+             the character it is sitting on"
+        );
     }
 
     #[test]

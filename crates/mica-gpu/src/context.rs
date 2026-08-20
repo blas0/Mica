@@ -13,8 +13,9 @@ use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::{NSString, NSURL};
 use objc2_metal::{
+    MTLBlitCommandEncoder, MTLCommandBuffer, MTLCommandEncoder,
     MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice, MTLLibrary, MTLPixelFormat,
-    MTLPrimitiveType, MTLRegion, MTLRenderPipelineDescriptor, MTLRenderPipelineState,
+    MTLPrimitiveType, MTLRenderPipelineDescriptor, MTLRenderPipelineState,
     MTLResourceOptions, MTLSamplerAddressMode, MTLSamplerDescriptor, MTLSamplerMinMagFilter,
     MTLSamplerState, MTLSize, MTLStorageMode, MTLTexture, MTLTextureDescriptor, MTLTextureUsage,
     MTLBlendFactor, MTLBlendOperation, MTLOrigin, MTLResource,
@@ -89,6 +90,20 @@ pub struct GpuContext {
     pages: Vec<PageTexture>,
     page_size: u32,
     atlas_generation: u32,
+    /// Glyph uploads staged for the next command buffer.
+    ///
+    /// See [`GpuContext::stage_upload`] for why they are staged rather than
+    /// written straight into the texture.
+    pending: Vec<StagedUpload>,
+}
+
+/// One glyph rectangle, waiting to be blitted into its page.
+struct StagedUpload {
+    page: usize,
+    origin: MTLOrigin,
+    size: MTLSize,
+    bytes_per_row: usize,
+    source: Retained<ProtocolObject<dyn objc2_metal::MTLBuffer>>,
 }
 
 impl std::fmt::Debug for GpuContext {
@@ -119,6 +134,7 @@ impl GpuContext {
             pages: Vec::new(),
             page_size: page_size.max(64) as u32,
             atlas_generation: u32::MAX,
+            pending: Vec::new(),
         })
     }
 
@@ -161,11 +177,24 @@ impl GpuContext {
         self.atlas_generation
     }
 
-    /// Copies one glyph into its page, creating the page's texture on first use.
+    /// Stages one glyph for its page, creating the page's texture on first use.
+    ///
+    /// **Staged rather than written directly, and that is the whole point.**
+    /// The obvious implementation is `replaceRegion`, a CPU write straight into
+    /// the texture — and it is correct exactly as long as the GPU is not
+    /// reading that texture at the time. While the renderer waited for every
+    /// frame to complete, that was guaranteed by accident. It is not guaranteed
+    /// any more: a frame is committed and returns immediately, so the previous
+    /// frame can still be sampling the atlas when the next glyph arrives.
+    /// Typing is precisely when new glyphs arrive, which is precisely when the
+    /// corruption showed.
+    ///
+    /// Copying through a buffer puts the write on the GPU's own timeline, where
+    /// Metal's automatic hazard tracking orders it against the reads.
     ///
     /// Pages are created lazily because a session that never draws an emoji
     /// should never allocate a four-byte-per-pixel texture.
-    pub fn upload(&mut self, upload: &mica_atlas::atlas::Upload) -> Result<(), GpuError> {
+    pub fn stage_upload(&mut self, upload: &mica_atlas::atlas::Upload) -> Result<(), GpuError> {
         let index = upload.page as usize;
         while self.pages.len() <= index {
             // A page is only ever appended in order, so any gap would be a bug
@@ -180,31 +209,59 @@ impl GpuContext {
         }
 
         let bytes_per_row = upload.rect.width as usize * upload.format.bytes_per_pixel();
-        let region = MTLRegion {
-            origin: MTLOrigin {
-                x: upload.rect.x as usize,
-                y: upload.rect.y as usize,
-                z: 0,
-            },
+        let source = self
+            .buffer_from(&upload.data, "mica.atlas.staging")?
+            .ok_or(GpuError::TextureFailed)?;
+
+        self.pending.push(StagedUpload {
+            page: index,
+            origin: MTLOrigin { x: upload.rect.x as usize, y: upload.rect.y as usize, z: 0 },
             size: MTLSize {
                 width: upload.rect.width as usize,
                 height: upload.rect.height as usize,
                 depth: 1,
             },
-        };
+            bytes_per_row,
+            source,
+        });
+        Ok(())
+    }
 
-        // SAFETY: the region is inside the texture (the packer guarantees it),
-        // and `data` holds exactly `bytes_per_row * height` bytes — asserted by
-        // the atlas's own `an_upload_carries_exactly_its_rectangle_of_pixels`.
-        unsafe {
-            self.pages[index].texture.replaceRegion_mipmapLevel_withBytes_bytesPerRow(
-                region,
-                0,
-                std::ptr::NonNull::new(upload.data.as_ptr() as *mut std::ffi::c_void)
-                    .ok_or(GpuError::TextureFailed)?,
-                bytes_per_row,
-            );
+    pub fn has_pending_uploads(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
+    /// Encodes every staged upload into `command_buffer`, ahead of the render
+    /// pass that will sample them.
+    ///
+    /// Must be called on the same command buffer as the frame that needs the
+    /// glyphs, and before its render encoder: within one command buffer, Metal
+    /// orders a blit before a later render pass that reads the same texture.
+    pub fn flush_uploads(
+        &mut self,
+        command_buffer: &ProtocolObject<dyn objc2_metal::MTLCommandBuffer>,
+    ) -> Result<(), GpuError> {
+        if self.pending.is_empty() {
+            return Ok(());
         }
+        let blit = command_buffer.blitCommandEncoder().ok_or(GpuError::BufferFailed)?;
+        for staged in self.pending.drain(..) {
+            let texture = &self.pages[staged.page].texture;
+            unsafe {
+                blit.copyFromBuffer_sourceOffset_sourceBytesPerRow_sourceBytesPerImage_sourceSize_toTexture_destinationSlice_destinationLevel_destinationOrigin(
+                    &staged.source,
+                    0,
+                    staged.bytes_per_row,
+                    staged.bytes_per_row * staged.size.height,
+                    staged.size,
+                    texture,
+                    0,
+                    0,
+                    staged.origin,
+                );
+            }
+        }
+        blit.endEncoding();
         Ok(())
     }
 
@@ -449,7 +506,7 @@ mod tests {
         use mica_atlas::packer::Rect;
 
         let mut ctx = context();
-        ctx.upload(&Upload {
+        ctx.stage_upload(&Upload {
             page: 0,
             rect: Rect { x: 0, y: 0, width: 4, height: 4 },
             format: PixelFormat::Alpha8,
@@ -468,7 +525,7 @@ mod tests {
         use mica_atlas::packer::Rect;
 
         let mut ctx = context();
-        ctx.upload(&Upload {
+        ctx.stage_upload(&Upload {
             page: 0,
             rect: Rect { x: 0, y: 0, width: 2, height: 2 },
             format: PixelFormat::Bgra8,
@@ -501,7 +558,7 @@ mod tests {
         use mica_atlas::packer::Rect;
 
         let mut ctx = context();
-        ctx.upload(&Upload {
+        ctx.stage_upload(&Upload {
             page: 0,
             rect: Rect { x: 0, y: 0, width: 2, height: 2 },
             format: PixelFormat::Alpha8,
