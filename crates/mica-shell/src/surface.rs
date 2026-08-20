@@ -1289,7 +1289,7 @@ mod tests {
         assert!(s.shortcuts().is_capturing());
 
         let chord = Chord::new(Modifiers { command: true, ..Modifiers::NONE }, Key::Char('j'));
-        s.shortcut_key(chord.key, chord.modifiers);
+        s.shortcut_key(chord.key(), chord.modifiers());
         assert_eq!(s.bindings().chord_for("find.toggle"), Some(chord));
         assert!(!s.shortcuts().is_capturing());
     }

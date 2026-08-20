@@ -28,15 +28,47 @@ use std::collections::BTreeMap;
 use crate::keys::{Key, Modifiers};
 
 /// A key plus the modifiers held with it.
+///
+/// The fields are private, and that is load-bearing. A chord's key is
+/// **case-folded**: `charactersIgnoringModifiers` ignores every modifier
+/// except Shift, so `⌘⇧P` arrives from AppKit as the character `P` while the
+/// same binding written in a settings file says `p`. Case belongs to Shift,
+/// which is already in the modifiers; carrying it in the character as well
+/// gives one chord two spellings, and a table keyed on it misses half the
+/// time. It did: the command palette stopped opening.
+///
+/// Folding in the constructor rather than at each lookup is the difference
+/// between a rule and a habit — there is no way to build an unfolded chord.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Chord {
-    pub modifiers: Modifiers,
-    pub key: Key,
+    modifiers: Modifiers,
+    key: Key,
 }
 
 impl Chord {
     pub fn new(modifiers: Modifiers, key: Key) -> Chord {
+        let key = match key {
+            // `to_lowercase` yields a sequence; for every key on a keyboard it
+            // is one character, and anything stranger is left alone rather
+            // than truncated.
+            Key::Char(ch) => {
+                let mut lower = ch.to_lowercase();
+                match (lower.next(), lower.next()) {
+                    (Some(one), None) => Key::Char(one),
+                    _ => Key::Char(ch),
+                }
+            }
+            other => other,
+        };
         Chord { modifiers, key }
+    }
+
+    pub fn key(&self) -> Key {
+        self.key
+    }
+
+    pub fn modifiers(&self) -> Modifiers {
+        self.modifiers
     }
 
     /// Whether this is something a terminal should be allowed to steal.
@@ -85,7 +117,7 @@ impl Chord {
                 name => key = Some(parse_key_name(name)?),
             }
         }
-        Some(Chord { modifiers, key: key? })
+        Some(Chord::new(modifiers, key?))
     }
 
     /// The form shown in the palette and the shortcut panel, using the symbols
@@ -339,6 +371,51 @@ mod tests {
 
     fn cmd() -> Modifiers {
         Modifiers { command: true, ..Modifiers::NONE }
+    }
+
+    #[test]
+    fn a_shifted_letter_finds_its_binding() {
+        // Regression test. `charactersIgnoringModifiers` ignores every
+        // modifier *except* Shift, so ⌘⇧P arrives as the character `P`, not
+        // `p`. The table stored `p`, the lookup asked for `P`, and the command
+        // palette simply stopped opening.
+        //
+        // Case belongs to Shift, which is already in the modifiers. Carrying it
+        // in the character too means the same chord has two spellings.
+        let bindings = Bindings::defaults();
+        let shift_cmd = Modifiers { command: true, shift: true, ..Modifiers::NONE };
+        assert_eq!(
+            bindings.action(Chord::new(shift_cmd, Key::Char('P'))),
+            Some("palette.toggle"),
+            "⌘⇧P as AppKit actually delivers it did not find its binding"
+        );
+        assert_eq!(
+            bindings.action(Chord::new(shift_cmd, Key::Char('p'))),
+            Some("palette.toggle")
+        );
+    }
+
+    #[test]
+    fn case_is_not_part_of_a_chord() {
+        let cmd = Modifiers { command: true, ..Modifiers::NONE };
+        assert_eq!(Chord::new(cmd, Key::Char('F')), Chord::new(cmd, Key::Char('f')));
+        assert_eq!(Chord::new(cmd, Key::Char('F')).to_config(), "cmd+f");
+        // And a chord parsed from a file agrees with one built from a keypress.
+        assert_eq!(Chord::parse("cmd+F"), Some(Chord::new(cmd, Key::Char('f'))));
+    }
+
+    #[test]
+    fn a_shifted_binding_is_not_the_same_as_an_unshifted_one() {
+        // The other half: folding case must not collapse ⌘G and ⌘⇧G, which are
+        // next-match and previous-match.
+        let bindings = Bindings::defaults();
+        let cmd = Modifiers { command: true, ..Modifiers::NONE };
+        let cmd_shift = Modifiers { command: true, shift: true, ..Modifiers::NONE };
+        assert_eq!(bindings.action(Chord::new(cmd, Key::Char('g'))), Some("find.next"));
+        assert_eq!(
+            bindings.action(Chord::new(cmd_shift, Key::Char('G'))),
+            Some("find.previous")
+        );
     }
 
     #[test]

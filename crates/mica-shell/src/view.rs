@@ -725,6 +725,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_shifted_shortcut_decodes_into_a_chord_that_the_table_recognises() {
+        // The seam the bug lived in. `decode` faithfully returns what AppKit
+        // delivered, and AppKit's `charactersIgnoringModifiers` ignores every
+        // modifier *except* Shift — so ⌘⇧P arrives as `P`. The binding table
+        // held `p`. Each side was individually right and the palette stopped
+        // opening.
+        use crate::bindings::{Bindings, Chord};
+
+        const P: u16 = 35; // kVK_ANSI_P
+        let modifiers = Modifiers { command: true, shift: true, ..Modifiers::NONE };
+        let key = decode(P, "P", modifiers).expect("⌘⇧P decoded to nothing");
+        assert_eq!(key, Key::Char('P'), "AppKit's own spelling changed");
+
+        assert_eq!(
+            Bindings::defaults().action(Chord::new(modifiers, key)),
+            Some("palette.toggle"),
+            "⌘⇧P decoded fine but found no binding"
+        );
+    }
+
+    #[test]
     fn named_keys_are_decoded_from_their_key_codes() {
         assert_eq!(decode(keycode::RETURN, "\r", Modifiers::NONE), Some(Key::Enter));
         assert_eq!(decode(keycode::TAB, "\t", Modifiers::NONE), Some(Key::Tab));
