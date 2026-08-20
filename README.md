@@ -1,21 +1,30 @@
 # Mica
 Terminal emulator focused on smooth motion and lightweight rendering.
 
-## Mission
+![Static Badge](https://img.shields.io/badge/Apple%20Frameworks-black?logo=apple)
+![Static Badge](https://img.shields.io/badge/Rust-orange?logo=rust)
+
+### Mission
 
 - Lightweight terminal emulator
 - Smooth and fluid motions, and or animations
 - Extensible via open source code
+- Diverging from biased appendages
 
-## Primary Features
+> [!NOTE]
+> **Projected release**: 8/20/26
 
+### Primary Features
+
+> `alpha-0.1`
 1. Smooth kareting
 2. Smooth cursor blink
 3. Config is a file, keyboard shortcuts are a TUI
 
-## Stack
+### Stack
 
-**Crates**
+**Crates**:
+
 `mica-core`
 > terminal model, TerminalCore, PTY, motion physics, settings.
 
@@ -28,7 +37,8 @@ Terminal emulator focused on smooth motion and lightweight rendering.
 `mica-shell`
 > AppKit layer: NSView/CAMetalLayer, key decoding, bindings, scroll, wired by Surface
 
-**Apple Frameworks**
+**Apple Frameworks**:
+
 `AppKit`
 > window, view, event loop, menus
 
@@ -47,7 +57,8 @@ Terminal emulator focused on smooth motion and lightweight rendering.
 `libc / POSIX`
 > forkpty, execve, the reader thread
 
-**Config**
+**Config**:
+
 `toml` 
 > settings via `CMD + ,`
 
