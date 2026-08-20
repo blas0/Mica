@@ -27,7 +27,7 @@ use std::time::Instant;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::{define_class, msg_send, DeclaredClass, MainThreadMarker, MainThreadOnly};
-use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSView};
+use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventPhase, NSView};
 use objc2_core_foundation::CGSize;
 use objc2_foundation::{NSNotification, NSObjectProtocol, NSRect, NSSize};
 use objc2_quartz_core::{CALayer, CAMetalDrawable, CAMetalLayer};
@@ -35,6 +35,7 @@ use objc2_quartz_core::{CALayer, CAMetalDrawable, CAMetalLayer};
 use mica_core::session::SessionEvent;
 
 use crate::keys::{CursorKeyMode, Key, KeyConfig, Modifiers};
+use crate::scroll::ScrollAccumulator;
 use crate::surface::Surface;
 
 // libdispatch, declared here rather than pulled in as a dependency: two symbols
@@ -135,6 +136,8 @@ pub struct MicaViewState {
     pub last_frame: Cell<Option<Instant>>,
     /// Set while a frame continuation is already queued on the main queue.
     pub frame_queued: Arc<AtomicBool>,
+    /// Keeps the sub-line remainder of trackpad scrolling.
+    pub scroll: RefCell<ScrollAccumulator>,
 }
 
 /// What crosses the thread boundary to the main queue.
@@ -243,17 +246,40 @@ define_class!(
         #[unsafe(method(scrollWheel:))]
         fn scroll_wheel(&self, event: &NSEvent) {
             let delta = unsafe { event.scrollingDeltaY() };
+            let precise = unsafe { event.hasPreciseScrollingDeltas() };
+            let phase = unsafe { event.phase() };
+
+            let Some(surface) = self.ivars().surface.borrow_mut().as_mut().map(|s| s as *mut Surface)
+            else {
+                return;
+            };
+            // SAFETY: the borrow ends with the statement above; nothing else on
+            // this thread touches the surface in between.
+            let surface = unsafe { &mut *surface };
+
+            // A finished gesture drops its partial line, so half a line of
+            // leftover finger movement cannot surface later attached to an
+            // unrelated flick.
+            if phase.contains(NSEventPhase::Ended) || phase.contains(NSEventPhase::Cancelled) {
+                self.ivars().scroll.borrow_mut().reset();
+            }
             if delta == 0.0 {
                 return;
             }
+
             // Scroll up (positive delta) moves the viewport into history.
-            let lines = (delta / 3.0).round() as i32;
+            let lines = self.ivars().scroll.borrow_mut().lines(
+                delta,
+                precise,
+                surface.cell_height_points(),
+            );
             if lines == 0 {
+                // Not nothing: the fraction is kept, and a slow drag reaches a
+                // whole line after enough events. Rounding here instead is why
+                // trackpad scrolling did nothing at all.
                 return;
             }
-            if let Some(surface) = self.ivars().surface.borrow_mut().as_mut() {
-                surface.scroll(lines);
-            }
+            surface.scroll(lines);
             self.redraw();
         }
 
@@ -295,6 +321,7 @@ impl MicaView {
             alive: Arc::new(AtomicBool::new(true)),
             last_frame: Cell::new(None),
             frame_queued: Arc::new(AtomicBool::new(false)),
+            scroll: RefCell::new(ScrollAccumulator::new()),
         });
         let this: Retained<MicaView> = unsafe { msg_send![super(this), initWithFrame: frame] };
         unsafe {

@@ -7,6 +7,7 @@
 
 pub mod app;
 pub mod keys;
+pub mod scroll;
 pub mod surface;
 pub mod view;
 pub mod terminfo;

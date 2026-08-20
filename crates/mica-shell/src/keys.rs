@@ -107,6 +107,36 @@ impl Default for KeyConfig {
     }
 }
 
+/// The only keys Command is allowed to send to the shell.
+///
+/// macOS has two text-deletion conventions that every native control obeys:
+/// `⌥⌫` deletes the word to the left, and `⌘⌫` deletes to the start of the
+/// line. The first needs nothing special here — Option already sends an ESC
+/// prefix, so `⌥⌫` is `ESC DEL`, which is exactly what readline binds to
+/// `backward-kill-word`. The second has no such luck: Command is reserved for
+/// the application, so `⌘⌫` produced nothing at all and the key silently did
+/// less than it does in every other Mac text field.
+///
+/// `^U` is the byte to send, and it is worth being precise about what it does,
+/// because the two common shells disagree:
+///
+/// - **bash** binds `^U` to `unix-line-discard` — deletes from the cursor back
+///   to the start of the line, which is exactly the macOS behaviour.
+/// - **zsh** binds it to `kill-whole-line` — deletes the entire line including
+///   anything to the right of the cursor.
+///
+/// The difference only shows when the cursor is mid-line. There is no escape
+/// sequence that means "delete to line start" in general, so the choice is
+/// between `^U` and sending nothing; a key that usually does the right thing
+/// beats a key that never does anything. A user who wants the strict bash
+/// behaviour in zsh can `bindkey '^U' backward-kill-line`.
+fn command_exception(key: &Key) -> Option<Vec<u8>> {
+    match key {
+        Key::Backspace => Some(vec![0x15]),
+        _ => None,
+    }
+}
+
 /// Encodes a key press. Returns `None` when the key produces nothing — which
 /// is the correct response to a bare modifier or an unhandled combination, and
 /// is not the same as producing an empty string.
@@ -114,8 +144,10 @@ pub fn encode(key: &Key, modifiers: Modifiers, config: KeyConfig) -> Option<Vec<
     // Command is the application's, never the terminal's. Cmd-C must not send
     // a byte to the shell; if it reaches this function at all, something in the
     // menu handling is wrong.
+    //
+    // One deliberate exception, below.
     if modifiers.command {
-        return None;
+        return command_exception(key);
     }
 
     let mut out = Vec::with_capacity(8);
@@ -359,16 +391,65 @@ mod tests {
     }
 
     #[test]
-    fn command_never_reaches_the_shell() {
+    fn command_never_reaches_the_shell_except_for_the_one_documented_key() {
         // Cmd-C is a menu item, not a keystroke. If this ever returns bytes,
         // copying text would also send it to the running program.
-        for key in [Key::Char('c'), Key::Char('v'), Key::Enter, Key::Left] {
+        for key in [Key::Char('c'), Key::Char('v'), Key::Enter, Key::Left, Key::Delete] {
             assert_eq!(
                 press(key.clone(), Modifiers { command: true, ..Modifiers::NONE }),
                 None,
                 "{key:?} leaked to the shell"
             );
         }
+    }
+
+    #[test]
+    fn option_backspace_deletes_the_word_to_the_left() {
+        // `ESC DEL` is readline's `backward-kill-word`, and it comes out of the
+        // ordinary Option-sends-escape rule rather than a special case.
+        assert_eq!(
+            press(Key::Backspace, Modifiers { alt: true, ..Modifiers::NONE }),
+            Some(vec![0x1b, 0x7f])
+        );
+    }
+
+    #[test]
+    fn command_backspace_deletes_to_the_start_of_the_line() {
+        // The macOS convention every native text field obeys. Before this it
+        // sent nothing at all, because Command returns early.
+        assert_eq!(
+            press(Key::Backspace, Modifiers { command: true, ..Modifiers::NONE }),
+            Some(vec![0x15]),
+            "Cmd-Backspace should send ^U"
+        );
+    }
+
+    #[test]
+    fn the_three_backspaces_are_three_different_keys() {
+        // Plain, word, line. A terminal that collapses any two of these has
+        // taken a key away from the user without telling them.
+        let plain = press(Key::Backspace, Modifiers::NONE);
+        let word = press(Key::Backspace, Modifiers { alt: true, ..Modifiers::NONE });
+        let line = press(Key::Backspace, Modifiers { command: true, ..Modifiers::NONE });
+
+        assert_eq!(plain, Some(vec![0x7f]));
+        assert_ne!(plain, word);
+        assert_ne!(word, line);
+        assert_ne!(plain, line);
+    }
+
+    #[test]
+    fn command_and_option_together_do_not_produce_a_third_thing_by_accident() {
+        // Command wins, because Command is checked first. Worth pinning: the
+        // alternative is `ESC ^U`, which no readline binds and which would
+        // insert a literal control character in some programs.
+        assert_eq!(
+            press(
+                Key::Backspace,
+                Modifiers { command: true, alt: true, ..Modifiers::NONE }
+            ),
+            Some(vec![0x15])
+        );
     }
 
     #[test]

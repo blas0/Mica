@@ -815,6 +815,16 @@ impl Surface {
         self.session.has_damage()
     }
 
+    /// The cell height in **points**, not device pixels.
+    ///
+    /// Scroll deltas arrive in points, so this is the unit they must be
+    /// divided by; using device pixels would make scrolling twice as fast on a
+    /// Retina display.
+    pub fn cell_height_points(&self) -> f32 {
+        let height = self.atlas.metrics().height as f32;
+        if self.scale > 0.0 { height / self.scale } else { height }
+    }
+
     pub fn cursor_line(&self) -> u16 {
         self.session.cursor().line
     }

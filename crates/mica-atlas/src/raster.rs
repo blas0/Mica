@@ -21,12 +21,14 @@ use std::ffi::c_void;
 
 use objc2_core_foundation::{
     kCFTypeDictionaryKeyCallBacks, kCFTypeDictionaryValueCallBacks, CFAttributedString,
-    CFDictionary, CFRetained, CFString, CGAffineTransform, CGPoint,
+    kCFBooleanTrue, CFBoolean, CFDictionary, CFRetained, CFString, CGAffineTransform, CGPoint,
 };
 use objc2_core_graphics::{
     CGBitmapContextCreate, CGColorSpace, CGContext, CGGlyph, CGImageAlphaInfo,
 };
-use objc2_core_text::{kCTFontAttributeName, CTFont, CTLine};
+use objc2_core_text::{
+    kCTFontAttributeName, kCTForegroundColorFromContextAttributeName, CTFont, CTLine,
+};
 
 use crate::boxdraw;
 use crate::fontset::{CellMetrics, FontSet, Style};
@@ -67,6 +69,38 @@ pub struct Bitmap {
 impl Bitmap {
     pub fn is_empty(&self) -> bool {
         self.width == 0 || self.height == 0
+    }
+
+    /// Reinterprets a monochrome BGRA bitmap as single-channel coverage.
+    ///
+    /// Only sound because the pixels are premultiplied white, so every channel
+    /// already equals alpha; the alpha byte alone carries the whole glyph.
+    pub fn into_mask(self) -> Bitmap {
+        if self.format != PixelFormat::Bgra8 {
+            return self;
+        }
+        let data = self.data.chunks_exact(4).map(|px| px[3]).collect();
+        Bitmap { format: PixelFormat::Alpha8, data, ..self }
+    }
+
+    /// Whether the bitmap has actual colour in it.
+    ///
+    /// The question this really answers is "is this a picture or a letter?".
+    /// A colour glyph has hues; a text glyph drawn through the same BGRA path
+    /// — CoreText's fallback for a character the text font lacks — is white
+    /// coverage and nothing else. Alpha8 bitmaps are never polychrome by
+    /// construction.
+    pub fn is_polychrome(&self) -> bool {
+        if self.format != PixelFormat::Bgra8 {
+            return false;
+        }
+        self.data.chunks_exact(4).any(|px| {
+            let (b, g, r, a) = (px[0], px[1], px[2], px[3]);
+            // Compare against alpha, not against each other: the pixels are
+            // premultiplied, so a half-transparent white is (128,128,128,128)
+            // and only differs from grey by knowing what alpha was.
+            a != 0 && (b != a || g != a || r != a)
+        })
     }
 }
 
@@ -304,6 +338,14 @@ fn draw_line_colour(
     let height = (metrics.height as i32 + pad * 2) as usize;
 
     let canvas = Canvas::new(width, height, PixelFormat::Bgra8)?;
+    // White, for the same reason as the greyscale path: a monochrome glyph
+    // coming out of here is coverage the renderer will tint with the cell's
+    // colour, and the default fill is black. Drawing it black meant every
+    // character the text font lacked — CJK, Greek, arrows — rendered as black
+    // pixels whatever the theme said, which on a dark background is
+    // indistinguishable from not rendering at all. A colour glyph ignores the
+    // fill colour, so this costs emoji nothing.
+    CGContext::set_rgb_fill_color(Some(&canvas.context), 1.0, 1.0, 1.0, 1.0);
     let line = attributed_line(font, text)?;
 
     let baseline_y = height as f64 - pad as f64 - metrics.baseline as f64;
@@ -313,29 +355,80 @@ fn draw_line_colour(
 
     let mut bitmap = canvas.trim(pad, pad);
 
-    // An emoji drawn at the text size routinely exceeds one cell. Scaling it
+    // An emoji drawn at the text size routinely exceeds its cells. Scaling it
     // down here rather than letting it bleed is what keeps "one cluster, one
     // cell" true.
-    if bitmap.width as i32 > cell_w {
+    let downscaled = bitmap.width as i32 > cell_w;
+    if downscaled {
         bitmap = downscale_to_width(&bitmap, cell_w as u16);
+    }
+
+    // **A picture gets centred; a letter keeps its baseline.**
+    //
+    // This path draws two quite different things. Grapheme clusters — a flag,
+    // a family, a skin-tone sequence — are pictures, and CoreText lays them
+    // out from the pen position using the emoji font's own metrics, which have
+    // nothing to do with this grid. Measured at Menlo 14 on a 2x display: a
+    // 28-pixel emoji landed at the left edge of a 34-pixel double-width cell,
+    // six pixels of dead space to its right, occupying rows 1..29 where the
+    // letter A occupies 4..23.
+    //
+    // But the same path is also the fallback for any scalar the text font does
+    // not have — CJK, Greek, arrows. Those *are* letters, they do sit on the
+    // baseline, and centring them would make a line of mixed Latin and CJK
+    // stagger up and down. So the two cases are told apart by whether the
+    // glyph actually has colour in it, which is the difference that matters and
+    // costs one scan per glyph per session.
+    if bitmap.is_polychrome() {
+        bitmap.left = ((cell_w - bitmap.width as i32) / 2).max(0) as i16;
+        bitmap.top = ((metrics.height as i32 - bitmap.height as i32) / 2).max(0) as i16;
+        return Some(bitmap);
+    }
+
+    // Monochrome: this is a letter that came through the colour path because
+    // the text font did not have it. Hand it back as a mask so the renderer
+    // tints it with the cell's foreground like any other glyph — and so it
+    // takes a quarter of the atlas space it would as BGRA.
+    bitmap = bitmap.into_mask();
+    if downscaled {
+        // Monochrome and oversized: its offsets did not survive the scale, so
+        // it has to be placed, but it is still text — centre it across the
+        // cells and stand it on the baseline.
+        bitmap.left = ((cell_w - bitmap.width as i32) / 2).max(0) as i16;
+        bitmap.top = (metrics.baseline as i32 - bitmap.height as i32).max(0) as i16;
     }
     Some(bitmap)
 }
 
 fn attributed_line(font: &CTFont, text: &str) -> Option<CFRetained<CTLine>> {
     let cf_text = CFString::from_str(text);
-    let mut keys: [*const c_void; 1] =
-        [unsafe { kCTFontAttributeName } as *const CFString as *const c_void];
-    let mut values: [*const c_void; 1] = [font as *const CTFont as *const c_void];
+    // Two attributes: the font, and permission to use the context's fill
+    // colour.
+    //
+    // The second one is not optional decoration. `CTLine` does **not** consult
+    // the context's fill colour by default — it draws in black unless the run
+    // carries a colour or this flag. So every character the text font lacked
+    // (CJK, Greek, arrows, anything reaching CoreText's fallback) was
+    // rasterised as black pixels, cached that way, and drawn as a colour glyph
+    // that ignores the cell's foreground. On a dark theme that is
+    // indistinguishable from the character not rendering at all.
+    let mut keys: [*const c_void; 2] = [
+        unsafe { kCTFontAttributeName } as *const CFString as *const c_void,
+        unsafe { kCTForegroundColorFromContextAttributeName } as *const CFString as *const c_void,
+    ];
+    let mut values: [*const c_void; 2] = [
+        font as *const CTFont as *const c_void,
+        unsafe { kCFBooleanTrue }? as *const CFBoolean as *const c_void,
+    ];
 
-    // SAFETY: one key and one value, both borrowed for the length of the call;
+    // SAFETY: the keys and values are borrowed for the length of the call;
     // `CFDictionaryCreate` retains what it stores.
     let attributes = unsafe {
         CFDictionary::new(
             None,
             keys.as_mut_ptr(),
             values.as_mut_ptr(),
-            1,
+            2,
             &raw const kCFTypeDictionaryKeyCallBacks,
             &raw const kCFTypeDictionaryValueCallBacks,
         )
@@ -385,8 +478,13 @@ fn downscale_to_width(source: &Bitmap, target_width: u16) -> Bitmap {
         height: target_height,
         format: source.format,
         data,
-        left: (source.left as f32 * ratio).round() as i16,
-        top: (source.top as f32 * ratio).round() as i16,
+        // Deliberately zero rather than the source offsets scaled by `ratio`.
+        // The glyph shrank; the cell did not, so an offset measured against
+        // the old size means nothing against the new one. Scaling them was how
+        // a downscaled emoji ended up drifting toward the top-left of its
+        // cell. The caller places the result — see `draw_line_colour`.
+        left: 0,
+        top: 0,
     }
 }
 
@@ -396,6 +494,161 @@ mod tests {
 
     fn fonts() -> FontSet {
         FontSet::resolve("Menlo", 14.0, 2.0)
+    }
+
+    /// The clusters worth checking: a plain emoji, a variation-selector heart,
+    /// a regional-indicator flag, and a ZWJ family.
+    const CLUSTERS: [(&str, &str); 4] = [
+        ("emoji", "\u{1F600}"),
+        ("heart", "\u{2764}\u{FE0F}"),
+        ("flag", "\u{1F1EF}\u{1F1F5}"),
+        ("family", "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}"),
+    ];
+
+    #[test]
+    fn an_emoji_is_centred_in_the_cells_it_occupies() {
+        // The reported bug: emoji were drawn hard against the left edge of
+        // their double-width cell, with the slack all on one side. CoreText
+        // lays the run out from the pen position using the emoji font's
+        // metrics, which know nothing about this grid.
+        let f = fonts();
+        let m = f.metrics();
+        let cell_w = m.width as i32 * 2;
+
+        for (name, text) in CLUSTERS {
+            let b = rasterize_cluster(&f, text, Style::REGULAR, 2)
+                .unwrap_or_else(|| panic!("{name} produced nothing"));
+            let left = b.left as i32;
+            let right = cell_w - (left + b.width as i32);
+            assert!(
+                (left - right).abs() <= 1,
+                "{name} is off-centre: {left}px of slack on the left, {right}px on the right"
+            );
+        }
+    }
+
+    #[test]
+    fn an_emoji_stays_inside_its_own_cells() {
+        // Bleeding into the neighbour is how an emoji ends up clipping the
+        // character next to it.
+        let f = fonts();
+        let m = f.metrics();
+        let cell_w = m.width as i32 * 2;
+
+        for (name, text) in CLUSTERS {
+            let b = rasterize_cluster(&f, text, Style::REGULAR, 2).unwrap();
+            let (l, t) = (b.left as i32, b.top as i32);
+            assert!(l >= 0, "{name} overhangs the left edge by {}px", -l);
+            assert!(t >= 0, "{name} overhangs the top edge by {}px", -t);
+            assert!(
+                l + b.width as i32 <= cell_w,
+                "{name} is {}px wider than its cells",
+                l + b.width as i32 - cell_w
+            );
+            assert!(
+                t + b.height as i32 <= m.height as i32,
+                "{name} is {}px taller than its cell",
+                t + b.height as i32 - m.height as i32
+            );
+        }
+    }
+
+    #[test]
+    fn a_fallback_character_comes_back_as_a_tintable_mask() {
+        // Anything the text font lacks reaches CoreText's fallback through the
+        // same BGRA path as emoji. It is still a letter: it has to be coverage
+        // so the renderer tints it with the cell's colour.
+        //
+        // Before this, `CTLine` drew it in black — it ignores the context's
+        // fill colour unless told otherwise — and the renderer drew that black
+        // bitmap as a colour glyph. On a dark theme it was invisible.
+        let f = fonts();
+        for (name, text) in [("cjk", "\u{6F22}"), ("greek", "\u{03B1}"), ("arrow", "\u{2192}")] {
+            let Some(b) = rasterize_cluster(&f, text, Style::REGULAR, 1) else { continue };
+            if b.is_empty() {
+                continue;
+            }
+            assert_eq!(
+                b.format,
+                PixelFormat::Alpha8,
+                "{name} came back as a colour glyph, so it will ignore the cell's colour"
+            );
+            assert!(!b.is_polychrome());
+            assert!(b.data.iter().any(|&v| v > 0), "{name} rasterised to nothing");
+        }
+    }
+
+    #[test]
+    fn a_fallback_character_sits_on_the_text_line_rather_than_floating() {
+        // Centring a letter would make a line of mixed Latin and CJK stagger
+        // up and down, so the fallback path leaves CoreText's own placement
+        // alone. Asserted loosely on purpose: CJK ideographs legitimately
+        // descend below the baseline — the measured one ends three pixels
+        // under it — and pinning an exact offset would be pinning the metrics
+        // of whichever font macOS happens to substitute today.
+        let f = fonts();
+        let m = f.metrics();
+        for text in ["\u{6F22}", "\u{03B1}", "\u{2192}"] {
+            let Some(g) = rasterize_cluster(&f, text, Style::REGULAR, 2) else { continue };
+            if g.is_empty() {
+                continue;
+            }
+            let bottom = g.top as i32 + g.height as i32;
+            assert!(
+                bottom <= m.height as i32,
+                "{text:?} extends {}px past the bottom of its cell",
+                bottom - m.height as i32
+            );
+            assert!(
+                bottom >= m.baseline as i32 - m.baseline as i32 / 3,
+                "{text:?} ends at {bottom}, far above the baseline at {} — it is floating",
+                m.baseline
+            );
+        }
+    }
+
+    #[test]
+    fn an_emoji_is_still_drawn_in_colour() {
+        // The other half: the fix must not turn emoji into monochrome masks.
+        let f = fonts();
+        let b = rasterize_cluster(&f, "\u{1F600}", Style::REGULAR, 2).unwrap();
+        assert_eq!(b.format, PixelFormat::Bgra8);
+        assert!(b.is_polychrome(), "the emoji lost its colour");
+    }
+
+    #[test]
+    fn a_monochrome_bitmap_survives_the_round_trip_to_a_mask() {
+        let bgra = Bitmap {
+            width: 2,
+            height: 1,
+            format: PixelFormat::Bgra8,
+            // Premultiplied white at two coverages.
+            data: vec![255, 255, 255, 255, 128, 128, 128, 128],
+            left: 3,
+            top: 4,
+        };
+        assert!(!bgra.is_polychrome());
+        let mask = bgra.into_mask();
+        assert_eq!(mask.format, PixelFormat::Alpha8);
+        assert_eq!(mask.data, vec![255, 128]);
+        assert_eq!((mask.left, mask.top, mask.width), (3, 4, 2));
+    }
+
+    #[test]
+    fn a_coloured_bitmap_is_recognised_as_one() {
+        let red = Bitmap {
+            width: 1,
+            height: 1,
+            format: PixelFormat::Bgra8,
+            data: vec![0, 0, 255, 255],
+            left: 0,
+            top: 0,
+        };
+        assert!(red.is_polychrome());
+        // And a fully transparent pixel is not colour, whatever is in the
+        // other channels.
+        let blank = Bitmap { data: vec![0, 0, 0, 0], ..red };
+        assert!(!blank.is_polychrome());
     }
 
     #[test]
