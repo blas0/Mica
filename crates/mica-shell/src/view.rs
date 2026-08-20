@@ -683,6 +683,20 @@ impl MicaView {
         surface.write_input(b"\x1b[201~");
     }
 
+    /// Applies a settings file that changed on disk, and redraws.
+    pub fn apply_settings(&self, settings: &mica_core::settings::Settings) -> Vec<&'static str> {
+        let Some(surface) = self.ivars().surface.borrow_mut().as_mut().map(|s| s as *mut Surface)
+        else {
+            return Vec::new();
+        };
+        // SAFETY: the borrow above is released at the end of the statement and
+        // nothing else touches the surface on this thread in between.
+        let surface = unsafe { &mut *surface };
+        let deferred = surface.apply_settings(settings);
+        self.redraw();
+        deferred
+    }
+
     pub fn has_exited(&self) -> bool {
         self.ivars().surface.borrow().as_ref().is_some_and(Surface::has_exited)
     }
@@ -728,20 +742,20 @@ mod tests {
     fn a_shifted_shortcut_decodes_into_a_chord_that_the_table_recognises() {
         // The seam the bug lived in. `decode` faithfully returns what AppKit
         // delivered, and AppKit's `charactersIgnoringModifiers` ignores every
-        // modifier *except* Shift — so ⌘⇧P arrives as `P`. The binding table
-        // held `p`. Each side was individually right and the palette stopped
-        // opening.
+        // modifier *except* Shift — so ⌘⇧G arrives as `G`. The binding table
+        // held `g`. Each side was individually right and every shifted
+        // binding stopped firing.
         use crate::bindings::{Bindings, Chord};
 
-        const P: u16 = 35; // kVK_ANSI_P
+        const G: u16 = 5; // kVK_ANSI_G
         let modifiers = Modifiers { command: true, shift: true, ..Modifiers::NONE };
-        let key = decode(P, "P", modifiers).expect("⌘⇧P decoded to nothing");
-        assert_eq!(key, Key::Char('P'), "AppKit's own spelling changed");
+        let key = decode(G, "G", modifiers).expect("⌘⇧G decoded to nothing");
+        assert_eq!(key, Key::Char('G'), "AppKit's own spelling changed");
 
         assert_eq!(
             Bindings::defaults().action(Chord::new(modifiers, key)),
-            Some("palette.toggle"),
-            "⌘⇧P decoded fine but found no binding"
+            Some("find.previous"),
+            "⌘⇧G decoded fine but found no binding"
         );
     }
 

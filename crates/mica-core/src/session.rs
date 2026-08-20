@@ -203,6 +203,11 @@ impl Session {
         self.pinned_to_history = delta > 0 || self.pinned_to_history;
     }
 
+    /// Rows held, including scrollback.
+    pub fn history_len(&self) -> usize {
+        self.core.history_len()
+    }
+
     pub fn scroll_to_bottom(&mut self) {
         if self.pinned_to_history {
             self.core.scroll_viewport(-(self.core.history_len() as i32));

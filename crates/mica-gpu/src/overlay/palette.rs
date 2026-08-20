@@ -30,36 +30,25 @@ pub struct Action {
 }
 
 impl Action {
-    fn new(id: &str, label: &str, shortcut: &str) -> Action {
-        Action { id: id.into(), label: label.into(), shortcut: shortcut.into() }
+    /// A palette entry with no accelerator yet. The shell fills those in from
+    /// the binding table.
+    pub fn plain(id: &str, label: &str) -> Action {
+        Action { id: id.into(), label: label.into(), shortcut: String::new() }
     }
 }
 
-/// The action set. Themes are appended at construction so a user theme appears
-/// without anything here changing.
-pub fn default_actions(theme_ids: &[String]) -> Vec<Action> {
-    let mut actions = vec![
-        Action::new("session.next_tab", "Next Tab", "⌃⇥"),
-        Action::new("session.previous_tab", "Previous Tab", "⌃⇧⇥"),
-        Action::new("session.scroll_bottom", "Scroll to Bottom", ""),
-        Action::new("session.clear_selection", "Clear Selection", "⎋"),
-        Action::new("blocks.next", "Next Command Block", ""),
-        Action::new("blocks.previous", "Previous Command Block", ""),
-        Action::new("blocks.fold", "Fold Command Block", ""),
-        Action::new("keys.open", "Keyboard Shortcuts", ""),
-        Action::new("settings.fx.cursor", "Caret Motion · Next Style", ""),
-        Action::new("settings.fx.decay", "Toggle Caret Decay", ""),
-        Action::new("settings.fx.blink", "Toggle Caret Blink", ""),
-        Action::new("settings.fx.reduce", "Toggle Reduce Motion", ""),
-        Action::new("settings.fx.blocks", "Toggle Block Gutter", ""),
-        Action::new("settings.fx.depth", "Toggle Ambient Light", ""),
-    ];
+/// The base action set plus one entry per theme.
+///
+/// The base set is **passed in**, not written here. It used to be a literal in
+/// this file, which meant the palette, the shortcut panel, and the settings
+/// catalogue each had their own idea of what Mica could do — and the palette's
+/// copy advertised `⌃⇥` for tabs that do not exist and `⌘↓` for two different
+/// actions. There is one catalogue now, in the window layer, because that is
+/// the layer that also owns the bindings.
+pub fn actions_with_themes(base: &[Action], theme_ids: &[String]) -> Vec<Action> {
+    let mut actions = base.to_vec();
     for id in theme_ids {
-        actions.push(Action::new(
-            &format!("theme.{id}"),
-            &format!("Theme · {id}"),
-            "",
-        ));
+        actions.push(Action::plain(&format!("theme.{id}"), &format!("Theme · {id}")));
     }
     actions
 }
@@ -142,8 +131,13 @@ impl Palette {
         self.rerank();
     }
 
-    pub fn set_theme_ids(&mut self, theme_ids: &[String]) {
-        self.actions = default_actions(theme_ids);
+    /// Replaces the whole action set.
+    ///
+    /// Accelerators are **not** preserved: they are derived from the binding
+    /// table, and the caller has to reapply them. Keeping stale ones here is
+    /// how the palette came to advertise shortcuts that did not work.
+    pub fn set_actions(&mut self, base: &[Action], theme_ids: &[String]) {
+        self.actions = actions_with_themes(base, theme_ids);
         self.rerank();
     }
 
@@ -352,7 +346,7 @@ impl Palette {
 
 impl Default for Palette {
     fn default() -> Palette {
-        Palette::new(default_actions(&[]))
+        Palette::new(Vec::new())
     }
 }
 
@@ -360,12 +354,25 @@ impl Default for Palette {
 mod tests {
     use super::*;
 
+    /// A stand-in catalogue. The real one lives in `mica-shell`, which is the
+    /// point: this crate draws a palette, it does not decide what is in one.
+    fn base() -> Vec<Action> {
+        vec![
+            Action::plain("palette.toggle", "Command Palette"),
+            Action::plain("find.toggle", "Find in Scrollback"),
+            Action::plain("find.next", "Next Match"),
+            Action::plain("session.scroll_bottom", "Scroll to Bottom"),
+            Action::plain("session.next_tab", "Next Tab"),
+            Action::plain("blocks.next", "Next Command Block"),
+            Action::plain("settings.fx.blink", "Toggle Caret Blink"),
+        ]
+    }
+
     fn palette() -> Palette {
-        Palette::new(default_actions(&[
-            "slate".to_owned(),
-            "quartz".to_owned(),
-            "basalt".to_owned(),
-        ]))
+        Palette::new(actions_with_themes(
+            &base(),
+            &["slate".to_owned(), "quartz".to_owned(), "basalt".to_owned()],
+        ))
     }
 
     #[test]

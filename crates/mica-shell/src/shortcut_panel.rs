@@ -229,7 +229,8 @@ mod tests {
     #[test]
     fn space_starts_capturing_and_the_next_combination_binds() {
         let (mut panel, mut bindings) = open();
-        panel.move_selection(1); // Find in Scrollback
+        let target = BINDABLE.iter().position(|b| b.id == "find.toggle").unwrap();
+        panel.move_selection(target as i32);
         assert_eq!(panel.selected_id(), Some("find.toggle"));
 
         assert_eq!(panel.begin_capture(), Handled::Redraw);
@@ -331,7 +332,11 @@ mod tests {
             rows.iter().any(|(_, chord)| !chord.is_empty()),
             "no row showed a binding at all"
         );
-        assert_eq!(rows[0].1, "⇧⌘P");
+        // Looked up by id rather than by row index: the order of `BINDABLE`
+        // is a presentation choice, and a test that pins it fails every time
+        // an action is added.
+        let palette = BINDABLE.iter().position(|b| b.id == "palette.toggle").unwrap();
+        assert_eq!(rows[palette].1, "F5");
     }
 
     #[test]

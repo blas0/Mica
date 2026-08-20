@@ -73,6 +73,7 @@ pub mod cell;
 pub mod material;
 pub mod motion;
 pub mod pty;
+pub mod reference;
 pub mod semantic;
 pub mod session;
 pub mod settings;

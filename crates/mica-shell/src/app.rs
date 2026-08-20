@@ -27,7 +27,7 @@ use objc2_foundation::{
 };
 
 use mica_core::session::SessionEvent;
-use mica_core::settings::Settings;
+use mica_core::settings::{Settings, SettingsWatcher};
 
 use crate::surface::Surface;
 use crate::view::MicaView;
@@ -39,6 +39,13 @@ fn integration_root(index: u64) -> std::path::PathBuf {
 
 pub struct AppState {
     pub settings: RefCell<Settings>,
+    /// Notices when the settings file changes on disk.
+    ///
+    /// Polled when Mica becomes the active application rather than on a timer.
+    /// The gesture this serves is "edit the file, switch back", which *is* an
+    /// activation — and a timer would be the one thing the whole
+    /// damage-driven design exists to avoid.
+    pub watcher: RefCell<SettingsWatcher>,
     pub windows: RefCell<Vec<Retained<NSWindow>>>,
     pub next_session: RefCell<u64>,
 }
@@ -57,6 +64,11 @@ define_class!(
         fn did_finish_launching(&self, _notification: &NSNotification) {
             let mtm = MainThreadMarker::from(self);
             self.open_window(mtm);
+        }
+
+        #[unsafe(method(applicationDidBecomeActive:))]
+        fn did_become_active(&self, _notification: &NSNotification) {
+            self.reload_settings();
         }
 
         #[unsafe(method(applicationShouldTerminateAfterLastWindowClosed:))]
@@ -131,10 +143,50 @@ impl AppDelegate {
     pub fn new(mtm: MainThreadMarker, settings: Settings) -> Retained<AppDelegate> {
         let this = AppDelegate::alloc(mtm).set_ivars(AppState {
             settings: RefCell::new(settings),
+            watcher: RefCell::new(SettingsWatcher::new(crate::config::path())),
             windows: RefCell::new(Vec::new()),
             next_session: RefCell::new(0),
         });
         unsafe { msg_send![super(this), init] }
+    }
+
+    /// Applies the settings file if it changed since the last activation.
+    ///
+    /// A parse failure keeps the previous settings and says why. Losing
+    /// somebody's theme because of a stray bracket — silently, while they are
+    /// mid-edit in another window — is a worse outcome than a line on stderr.
+    fn reload_settings(&self) {
+        let Some(result) = self.ivars().watcher.borrow_mut().poll() else { return };
+        let path = crate::config::path();
+        let settings = match result {
+            Ok(settings) => settings,
+            Err(error) => {
+                eprintln!("mica: {} — {error}", path.display());
+                eprintln!("mica: keeping the settings already in force");
+                return;
+            }
+        };
+        *self.ivars().settings.borrow_mut() = settings.clone();
+
+        let windows = self.ivars().windows.borrow().clone();
+        let mut deferred: Vec<&'static str> = Vec::new();
+        for window in windows {
+            let Some(view) = (unsafe { window.contentView() }) else { continue };
+            let Ok(view) = view.downcast::<MicaView>() else { continue };
+            for item in view.apply_settings(&settings) {
+                if !deferred.contains(&item) {
+                    deferred.push(item);
+                }
+            }
+        }
+        if !deferred.is_empty() {
+            eprintln!(
+                "mica: {} {} on the next launch — a live grid cannot be reflowed \
+                 under a program that is drawing into it",
+                deferred.join(", "),
+                if deferred.len() == 1 { "applies" } else { "apply" }
+            );
+        }
     }
 
     /// Opens a window with a fresh shell in it.

@@ -25,6 +25,84 @@ pub enum Bell {
     Off,
 }
 
+/// Where a new pane's shell starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PaneOrigin {
+    /// The working directory of the pane that was focused when it was opened.
+    Inherit,
+    /// Always `shell.starting-dir`, whatever the focused pane was doing.
+    StartingDir,
+}
+
+/// The ambient light pass — the gradient behind everything.
+///
+/// Split from [`Settings`] because it is one thing with two knobs, and the
+/// renderer wants both or neither.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AmbientSettings {
+    pub enabled: bool,
+    /// `0.1` is the setting the toggle used to mean, and it is the default.
+    /// `1.0` is as loud as the pass goes.
+    pub intensity: f32,
+}
+
+impl Default for AmbientSettings {
+    fn default() -> AmbientSettings {
+        AmbientSettings { enabled: true, intensity: 0.1 }
+    }
+}
+
+impl AmbientSettings {
+    /// The lowest and highest intensity a hand-edited file can ask for.
+    pub const RANGE: std::ops::RangeInclusive<f32> = 0.1..=1.0;
+
+    /// What the substrate pass should actually use.
+    ///
+    /// `intensity` is a dial from 0.1 to 1.0 rather than a raw shader
+    /// constant, because the number in the file has to mean something to a
+    /// person. `0.1` maps to `0.035`, which is what the pass was hardcoded to
+    /// before it was configurable — so an untouched install looks identical.
+    pub fn substrate_intensity(&self) -> f32 {
+        const UNIT: f32 = 0.35;
+        if !self.enabled {
+            return 0.0;
+        }
+        self.intensity.clamp(*Self::RANGE.start(), *Self::RANGE.end()) * UNIT
+    }
+
+    fn sanitised(self) -> AmbientSettings {
+        AmbientSettings {
+            enabled: self.enabled,
+            intensity: self.intensity.clamp(*Self::RANGE.start(), *Self::RANGE.end()),
+        }
+    }
+}
+
+/// What shell to run, where, and what a new pane inherits.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShellSettings {
+    /// Absolute path to the shell. `None` means "follow `$SHELL`", falling
+    /// back to [`crate::pty::ROOT_SHELL`].
+    pub program: Option<String>,
+    /// Where a shell starts. `None` means the home directory, which is what a
+    /// login shell does on its own.
+    pub starting_dir: Option<String>,
+    pub new_pane_origin: PaneOrigin,
+    pub focus_new_panes: bool,
+}
+
+impl Default for ShellSettings {
+    fn default() -> ShellSettings {
+        ShellSettings {
+            program: None,
+            starting_dir: None,
+            new_pane_origin: PaneOrigin::Inherit,
+            focus_new_panes: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
     pub theme: String,
@@ -45,6 +123,10 @@ pub struct Settings {
     /// preference is layered over `motion.reduce` at runtime by the shell,
     /// which is the only layer that can see AppKit.
     pub motion: MotionSettings,
+    /// The ambient light pass behind the grid.
+    pub ambient: AmbientSettings,
+    /// What shell to run and where.
+    pub shell: ShellSettings,
     /// Keyboard bindings that differ from the defaults, as
     /// `action id -> chord`. Stored as strings because the chord grammar
     /// belongs to the window layer: this crate must not learn what a modifier
@@ -66,6 +148,8 @@ impl Default for Settings {
             substitute_progress: false,
             substitute_spinner: false,
             motion: MotionSettings::default(),
+            ambient: AmbientSettings::default(),
+            shell: ShellSettings::default(),
             keys: std::collections::BTreeMap::new(),
         }
     }
@@ -83,6 +167,10 @@ pub struct SettingsFile {
     pub renderer: Option<Renderer>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub motion: Option<Motion>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ambient: Option<Ambient>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell: Option<Shell>,
     /// `action id = "chord"`. Free-form on purpose — the window layer owns the
     /// grammar and validates it, and an entry this version does not recognise
     /// is carried rather than rejected.
@@ -143,6 +231,28 @@ pub struct Motion {
     pub decay: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blink: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Ambient {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intensity: Option<f32>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct Shell {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub program: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub starting_dir: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_pane_from_focused_pane: Option<PaneOrigin>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub focus_new_panes: Option<bool>,
 }
 
 #[derive(Debug)]
@@ -230,12 +340,35 @@ impl Settings {
                 s.motion.blink = v;
             }
         }
+        if let Some(a) = &file.ambient {
+            if let Some(v) = a.enabled {
+                s.ambient.enabled = v;
+            }
+            if let Some(v) = a.intensity {
+                s.ambient.intensity = v;
+            }
+        }
+        if let Some(sh) = &file.shell {
+            if let Some(v) = &sh.program {
+                s.shell.program = (!v.is_empty()).then(|| v.clone());
+            }
+            if let Some(v) = &sh.starting_dir {
+                s.shell.starting_dir = (!v.is_empty()).then(|| v.clone());
+            }
+            if let Some(v) = sh.new_pane_from_focused_pane {
+                s.shell.new_pane_origin = v;
+            }
+            if let Some(v) = sh.focus_new_panes {
+                s.shell.focus_new_panes = v;
+            }
+        }
         if let Some(keys) = &file.keys {
             s.keys = keys.clone();
         }
         // Clamped here rather than trusted: this is the boundary a
         // hand-edited file crosses.
         s.motion = s.motion.sanitised();
+        s.ambient = s.ambient.sanitised();
         s
     }
 
@@ -271,11 +404,31 @@ impl Settings {
             blink: (m.blink != dm.blink).then_some(m.blink),
         };
 
+        let ambient = Ambient {
+            enabled: (self.ambient.enabled != d.ambient.enabled).then_some(self.ambient.enabled),
+            intensity: (self.ambient.intensity != d.ambient.intensity)
+                .then_some(self.ambient.intensity),
+        };
+        let shell = Shell {
+            program: (self.shell.program != d.shell.program).then(|| {
+                self.shell.program.clone().unwrap_or_default()
+            }),
+            starting_dir: (self.shell.starting_dir != d.shell.starting_dir).then(|| {
+                self.shell.starting_dir.clone().unwrap_or_default()
+            }),
+            new_pane_from_focused_pane: (self.shell.new_pane_origin != d.shell.new_pane_origin)
+                .then_some(self.shell.new_pane_origin),
+            focus_new_panes: (self.shell.focus_new_panes != d.shell.focus_new_panes)
+                .then_some(self.shell.focus_new_panes),
+        };
+
         SettingsFile {
             appearance: (appearance != Appearance::default()).then_some(appearance),
             window: (window != Window::default()).then_some(window),
             renderer: (renderer != Renderer::default()).then_some(renderer),
             motion: (motion != Motion::default()).then_some(motion),
+            ambient: (ambient != Ambient::default()).then_some(ambient),
+            shell: (shell != Shell::default()).then_some(shell),
             keys: (!self.keys.is_empty()).then(|| self.keys.clone()),
         }
     }
@@ -304,14 +457,23 @@ impl Settings {
         }
     }
 
-    pub fn save(&self, path: &Path) -> Result<(), SettingsError> {
+    /// Writes the documented file — the catalogue of every flag, then the
+    /// live configuration. See [`crate::reference`].
+    ///
+    /// `keys` is the bindable-action catalogue, which this crate cannot build
+    /// on its own: the chord grammar belongs to the window layer.
+    ///
+    /// There is deliberately only one writer of this file. A second one that
+    /// wrote bare TOML would silently delete the catalogue the first time a
+    /// setting changed.
+    pub fn save(&self, path: &Path, keys: &[crate::reference::KeyDoc]) -> Result<(), SettingsError> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
         // Write-then-rename: a crash mid-write must not leave the user with a
         // truncated settings file.
         let tmp = path.with_extension("toml.tmp");
-        std::fs::write(&tmp, self.serialize()?)?;
+        std::fs::write(&tmp, crate::reference::document(self, keys)?)?;
         std::fs::rename(&tmp, path)?;
         Ok(())
     }
@@ -505,7 +667,7 @@ substitute_spinner = true
         let mut s = Settings::default();
         s.theme = "quartz".into();
 
-        s.save(&path).unwrap();
+        s.save(&path, &[]).unwrap();
         assert_eq!(Settings::load(&path).unwrap(), s);
         let _ = std::fs::remove_dir_all(&dir);
     }

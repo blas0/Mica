@@ -7,6 +7,7 @@
 
 pub mod app;
 pub mod bindings;
+pub mod config;
 pub mod keys;
 pub mod scroll;
 pub mod shortcut_panel;

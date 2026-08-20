@@ -5,7 +5,7 @@
 //! session-to-pixels path can be driven from a test with no window, which is
 //! what [`Surface::render_to_texture`] exists for.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use mica_atlas::atlas::Atlas;
@@ -21,7 +21,7 @@ use mica_gpu::grid::{
     block_gutters, caret_decay, cursor_shape, RowBuilder, SubstrateUniforms, Uniforms,
 };
 use mica_gpu::overlay::find::Find;
-use mica_gpu::overlay::palette::{default_actions, Palette};
+use mica_gpu::overlay::palette::{actions_with_themes, Action, Palette};
 use mica_gpu::overlay::shortcuts::{self, ShortcutRow, ShortcutView};
 use mica_gpu::overlay::OverlayMetrics;
 use mica_gpu::renderer::Renderer;
@@ -69,6 +69,13 @@ pub struct Surface {
     /// edits it.
     bindings: Bindings,
     shortcuts: ShortcutPanel,
+    /// Where [`Surface::persist`] writes, and what `⌘,` opens.
+    ///
+    /// A field rather than a call to [`crate::config::path`] at each use, so a
+    /// test can point a surface at a temporary directory. Without it, running
+    /// the suite rewrote the developer's own settings file — which it did,
+    /// once, before this existed.
+    settings_path: PathBuf,
 }
 
 impl std::fmt::Debug for Surface {
@@ -136,7 +143,7 @@ impl Surface {
 
         let (cols, rows) = grid_size(viewport, metrics.width, metrics.height);
 
-        let mut config = PtyConfig::for_login_shell(cols, rows);
+        let mut config = PtyConfig::for_shell_settings(cols, rows, &settings.shell);
         config.cols = cols;
         config.rows = rows;
 
@@ -184,16 +191,27 @@ impl Surface {
             viewport,
             focused: true,
             title: String::from("Mica"),
-            palette: Palette::new(default_actions(&theme_ids())),
+            palette: Palette::new(actions_with_themes(&palette_actions(), &theme_ids())),
             find: Find::new(),
             bindings,
             shortcuts: ShortcutPanel::new(),
+            settings_path: crate::config::path(),
         };
         // The palette prints accelerators from the table, so it has to be told
         // once at construction as well as after every edit — otherwise every
-        // shortcut reads as unbound until the user opens `⌘,`.
+        // shortcut reads as unbound until the user opens the panel.
         surface.refresh_palette_accelerators();
         Ok(surface)
+    }
+
+    /// Redirects where settings are written. Tests only — the app uses
+    /// [`crate::config::path`], which is where a user expects to find it.
+    pub fn set_settings_path(&mut self, path: PathBuf) {
+        self.settings_path = path;
+    }
+
+    pub fn settings_path(&self) -> &Path {
+        &self.settings_path
     }
 
     pub fn palette(&self) -> &Palette {
@@ -274,8 +292,14 @@ impl Surface {
     /// would be a worse answer than rebinding and saying it did not stick.
     fn persist_bindings(&mut self) {
         self.settings.keys = self.bindings.overrides();
-        let path = mica_core::settings::default_path();
-        if let Err(error) = self.settings.save(&path) {
+        self.persist();
+    }
+
+    /// Writes the whole settings document — catalogue and configuration.
+    fn persist(&mut self) {
+        let path = self.settings_path.clone();
+        let keys = crate::config::key_docs(&self.bindings);
+        if let Err(error) = self.settings.save(&path, &keys) {
             eprintln!("mica: could not save {}: {error}", path.display());
         }
     }
@@ -297,7 +321,11 @@ impl Surface {
             self.palette.close();
         } else {
             self.find.close();
-            self.palette.set_theme_ids(&theme_ids());
+            // Rebuild, then reapply the accelerators. `set_actions` drops them
+            // on purpose — they are derived, and a palette that kept stale
+            // ones is how it came to advertise shortcuts that did nothing.
+            self.palette.set_actions(&palette_actions(), &theme_ids());
+            self.refresh_palette_accelerators();
             self.palette.open();
         }
         self.overlay_changed();
@@ -474,8 +502,23 @@ impl Surface {
             }
             "find.next" => self.overlay_step(true),
             "find.previous" => self.overlay_step(false),
-            "keys.open" | "settings.open" => {
+            "keys.open" => {
                 self.toggle_shortcuts();
+                true
+            }
+            "settings.open" => self.open_settings_file(),
+            "session.scroll_top" => {
+                // `history_len` is the whole buffer; scrolling by it saturates
+                // at the oldest line rather than needing to be exact.
+                let top = self.session.history_len() as i32;
+                self.scroll(top);
+                true
+            }
+            "settings.fx.ambient" => {
+                self.settings.ambient.enabled = !self.settings.ambient.enabled;
+                self.persist();
+                self.renderer.scheduler().request(Reason::Damage);
+                self.session.damage_all();
                 true
             }
             "settings.fx.cursor" => {
@@ -507,6 +550,24 @@ impl Surface {
             // doing nothing.
             _ => false,
         }
+    }
+
+    /// Opens the settings file in the user's text editor, writing it first if
+    /// it is not there yet.
+    ///
+    /// Failure is reported rather than swallowed: `⌘,` doing nothing at all,
+    /// with no message anywhere, is the worst version of this.
+    fn open_settings_file(&mut self) -> bool {
+        let path = self.settings_path.clone();
+        let keys = crate::config::key_docs(&self.bindings);
+        if let Err(error) = crate::config::ensure(&path, &self.settings, &keys) {
+            eprintln!("mica: could not write {}: {error}", path.display());
+            return true;
+        }
+        if let Err(error) = crate::config::reveal(&path) {
+            eprintln!("mica: could not open {}: {error}", path.display());
+        }
+        true
     }
 
     pub fn selection_text(&self) -> Option<String> {
@@ -656,6 +717,51 @@ impl Surface {
     /// Switching to a style that does not interpolate has to land the caret
     /// immediately: leaving it mid-flight would strand it between two cells
     /// with nothing left running to move it.
+    /// Applies a settings file that changed on disk.
+    ///
+    /// Only what can change under a running shell: theme, caret physics,
+    /// ambient light, and the key bindings. Font, grid size and scrollback are
+    /// deliberately left for the next launch — reflowing a live grid under a
+    /// program that is drawing into it is a different feature, and a settings
+    /// reload is the wrong place to discover that.
+    ///
+    /// Returns what was *not* applied, so the caller can say so rather than
+    /// leaving the user to wonder why their font did not change.
+    pub fn apply_settings(&mut self, settings: &Settings) -> Vec<&'static str> {
+        let mut deferred = Vec::new();
+        if settings.font_family != self.settings.font_family
+            || settings.font_size != self.settings.font_size
+        {
+            deferred.push("font");
+        }
+        if settings.columns != self.settings.columns || settings.rows != self.settings.rows {
+            deferred.push("window size");
+        }
+        if settings.scrollback != self.settings.scrollback {
+            deferred.push("scrollback");
+        }
+        if settings.shell != self.settings.shell {
+            deferred.push("shell");
+        }
+
+        let ambient_changed = settings.ambient != self.settings.ambient;
+        self.settings.ambient = settings.ambient;
+        self.settings.bell = settings.bell;
+        self.settings.keys = settings.keys.clone();
+        self.bindings = Bindings::from_overrides(&settings.keys);
+        self.refresh_palette_accelerators();
+
+        if settings.motion != self.motion {
+            self.set_motion(settings.motion);
+        }
+        self.set_theme(&settings.theme);
+        if ambient_changed {
+            self.session.damage_all();
+            self.renderer.scheduler().request(Reason::Damage);
+        }
+        deferred
+    }
+
     pub fn set_motion(&mut self, motion: MotionSettings) {
         self.motion = motion.sanitised();
         self.settings.motion = self.motion;
@@ -900,9 +1006,12 @@ impl Surface {
             background: background.to_linear(),
             tint: accent.to_linear(),
             focus: [0.5, 0.25],
-            // Deliberately restrained. The ambient pass is there to stop a flat
-            // background reading as a dead rectangle, not to be noticed.
-            intensity: 0.035,
+            // `[ambient] intensity` is a dial from 0.1 to 1.0 rather than a
+            // raw shader constant, because the number in the settings file has
+            // to mean something to a person. 0.1 — the default — is the 0.035
+            // this pass was hardcoded to before it was configurable, so an
+            // untouched install looks exactly as it did.
+            intensity: self.settings.ambient.substrate_intensity(),
             vignette: 0.12,
         }
     }
@@ -995,6 +1104,20 @@ impl Surface {
     }
 }
 
+/// The palette's base entries — the same catalogue the shortcut panel and the
+/// settings file are built from.
+///
+/// One list, three surfaces. The palette used to carry its own, which is how
+/// it advertised `⌃⇥` for tabs that do not exist and `⌘↓` for two different
+/// actions at once.
+fn palette_actions() -> Vec<Action> {
+    crate::bindings::BINDABLE
+        .iter()
+        .filter(|b| b.implemented)
+        .map(|b| Action::plain(b.id, b.label))
+        .collect()
+}
+
 /// The ids of the built-in themes, for the palette.
 fn theme_ids() -> Vec<String> {
     mica_core::material::builtin_themes().into_iter().map(|t| t.id).collect()
@@ -1024,8 +1147,14 @@ mod tests {
     }
 
     fn surface(name: &str) -> Surface {
-        Surface::open(Settings::default(), (800, 480), 2.0, temp_root(name), None)
-            .expect("a surface should open on this machine")
+        let root = temp_root(name);
+        let mut surface = Surface::open(Settings::default(), (800, 480), 2.0, root.clone(), None)
+            .expect("a surface should open on this machine");
+        // Never the real one. The suite rewrote the developer's own
+        // `~/.config/mica/settings.toml` before this line existed, and left a
+        // test's rebinding in it.
+        surface.set_settings_path(root.join("settings.toml"));
+        surface
     }
 
     #[test]
@@ -1290,13 +1419,143 @@ mod tests {
     }
 
     #[test]
+    fn an_edited_settings_file_applies_what_it_can_and_names_what_it_cannot() {
+        let mut s = surface("apply");
+        let mut edited = Settings::default();
+        edited.theme = "quartz".into();
+        edited.ambient.intensity = 0.5;
+        edited.motion.blink = !Settings::default().motion.blink;
+        edited.keys.insert("find.toggle".into(), "cmd+j".into());
+        // Two that cannot be applied to a live grid.
+        edited.font_size = 18.0;
+        edited.scrollback = 999;
+
+        let deferred = s.apply_settings(&edited);
+
+        assert_eq!(s.target_theme().id, "quartz");
+        assert_eq!(s.substrate().intensity, edited.ambient.substrate_intensity());
+        assert_eq!(s.motion().blink, edited.motion.blink);
+        assert_eq!(
+            s.bindings().chord_for("find.toggle"),
+            Chord::parse("cmd+j"),
+            "an edited binding did not reach the table"
+        );
+        assert!(deferred.contains(&"font"), "{deferred:?}");
+        assert!(deferred.contains(&"scrollback"), "{deferred:?}");
+        assert!(!deferred.contains(&"shell"), "{deferred:?}");
+    }
+
+    #[test]
+    fn reloading_an_unchanged_file_defers_nothing() {
+        // Otherwise every switch back to Mica prints a line telling the user
+        // their font will apply on the next launch.
+        let mut s = surface("apply-noop");
+        assert!(s.apply_settings(&Settings::default()).is_empty());
+    }
+
+    #[test]
+    fn no_test_surface_can_write_the_developers_own_settings_file() {
+        // This is not hypothetical. Before `set_settings_path` existed, the
+        // rebinding test below persisted through `mica_core::settings::
+        // default_path()` and left `find.toggle = "cmd+j"` in the real
+        // `~/.config/mica/settings.toml` of whoever ran `cargo test`.
+        let s = surface("settings-path");
+        assert_ne!(s.settings_path(), crate::config::path());
+        assert!(
+            s.settings_path().starts_with(std::env::temp_dir()),
+            "a test surface persists to {}",
+            s.settings_path().display()
+        );
+    }
+
+    #[test]
+    fn a_real_surface_persists_where_the_user_looks_for_it() {
+        // The other half: the redirect above must not have moved the app's
+        // own settings somewhere nobody can find them.
+        let root = temp_root("real-path");
+        let s = Surface::open(Settings::default(), (800, 480), 2.0, root, None).unwrap();
+        assert_eq!(s.settings_path(), crate::config::path());
+    }
+
+    #[test]
+    fn the_palette_still_prints_its_accelerators_after_being_reopened() {
+        // Regression. `set_theme_ids` rebuilt the action list from scratch,
+        // which dropped every accelerator the binding table had supplied — so
+        // the shortcuts were printed exactly once, at construction, and every
+        // subsequent open showed a palette with a blank right-hand column.
+        let mut s = surface("palette-accel");
+        s.toggle_palette();
+        s.toggle_palette();
+        s.toggle_palette();
+
+        let action = s
+            .palette()
+            .actions()
+            .iter()
+            .find(|a| a.id == "find.toggle")
+            .expect("find.toggle left the palette");
+        assert_eq!(
+            action.shortcut,
+            Chord::new(Modifiers { command: true, ..Modifiers::NONE }, Key::Char('f'))
+                .to_display(),
+            "the palette reopened with no accelerator"
+        );
+    }
+
+    #[test]
+    fn the_palette_offers_only_actions_that_do_something() {
+        // Tabs and panes are bindable and documented, but Mica has neither.
+        // Listing them in the palette would be offering a command that does
+        // nothing when you pick it.
+        let mut s = surface("palette-real");
+        s.toggle_palette();
+        let ids: Vec<&str> = s.palette().actions().iter().map(|a| a.id.as_str()).collect();
+        assert!(ids.contains(&"find.toggle"));
+        assert!(
+            !ids.contains(&"pane.split_right"),
+            "the palette is advertising a feature that does not exist"
+        );
+    }
+
+    #[test]
+    fn toggling_ambient_light_changes_what_the_substrate_asks_for() {
+        let mut s = surface("ambient");
+        let lit = s.substrate().intensity;
+        assert!(lit > 0.0, "the ambient pass starts off");
+        assert!(s.dispatch("settings.fx.ambient"));
+        assert_eq!(s.substrate().intensity, 0.0);
+        assert!(s.dispatch("settings.fx.ambient"));
+        assert_eq!(s.substrate().intensity, lit);
+    }
+
+    #[test]
+    fn the_default_ambient_intensity_is_what_the_pass_was_hardcoded_to() {
+        // The dial in the settings file runs 0.1 to 1.0 so the number means
+        // something to a person. 0.1 has to keep looking exactly like the
+        // constant it replaced, or every existing install changes appearance
+        // on upgrade.
+        assert_eq!(
+            mica_core::settings::AmbientSettings::default().substrate_intensity(),
+            0.035
+        );
+    }
+
+    #[test]
     fn arrows_space_and_a_combination_rebind_an_action_end_to_end() {
         // The whole interaction the panel exists for, driven through the same
         // entry point the window uses.
         let mut s = surface("keys-rebind");
         s.toggle_shortcuts();
 
-        s.shortcut_key(Key::Down, Modifiers::NONE);
+        // Walk down to a known row rather than assuming it is the second
+        // one: the order of `BINDABLE` is presentation, not contract.
+        let target = crate::bindings::BINDABLE
+            .iter()
+            .position(|b| b.id == "find.toggle")
+            .expect("find.toggle left the bindable set");
+        for _ in 0..target {
+            s.shortcut_key(Key::Down, Modifiers::NONE);
+        }
         let id = s.shortcuts().selected_id().expect("nothing selected");
         assert_eq!(id, "find.toggle");
 

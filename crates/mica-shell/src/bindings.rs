@@ -143,6 +143,7 @@ impl Chord {
 
 fn key_config_name(key: Key) -> String {
     match key {
+        Key::Char(' ') => "space".into(),
         Key::Char(ch) => ch.to_lowercase().to_string(),
         Key::Enter => "enter".into(),
         Key::Tab => "tab".into(),
@@ -199,6 +200,9 @@ fn parse_key_name(name: &str) -> Option<Key> {
         "pageup" | "pgup" => Key::PageUp,
         "pagedown" | "pgdn" => Key::PageDown,
         "insert" | "ins" => Key::Insert,
+        // Written out because a literal space cannot survive the `+`-split
+        // grammar, and the settings catalogue lists it as a key.
+        "space" => Key::Char(' '),
         other => {
             if let Some(digits) = other.strip_prefix('f') {
                 if let Ok(n) = digits.parse::<u8>() {
@@ -223,6 +227,12 @@ pub struct Bindable {
     /// The action id, shared with the command palette.
     pub id: &'static str,
     pub label: &'static str,
+    /// False for actions that exist as a binding and a palette entry but do
+    /// nothing yet — tabs and panes, which Mica does not have.
+    ///
+    /// Recorded rather than omitted so the settings catalogue can say so out
+    /// loud. A binding that silently does nothing is worse than no binding.
+    pub implemented: bool,
 }
 
 /// Every action the shortcut panel offers, in the order it lists them.
@@ -231,18 +241,33 @@ pub struct Bindable {
 /// includes one entry per theme, and a shortcut panel with twenty-two "Theme ·
 /// …" rows in it is a worse panel.
 pub const BINDABLE: &[Bindable] = &[
-    Bindable { id: "palette.toggle", label: "Command Palette" },
-    Bindable { id: "find.toggle", label: "Find in Scrollback" },
-    Bindable { id: "find.next", label: "Next Match" },
-    Bindable { id: "find.previous", label: "Previous Match" },
-    Bindable { id: "keys.open", label: "Keyboard Shortcuts" },
-    Bindable { id: "session.scroll_bottom", label: "Scroll to Bottom" },
-    Bindable { id: "blocks.next", label: "Next Command Block" },
-    Bindable { id: "blocks.previous", label: "Previous Command Block" },
-    Bindable { id: "settings.fx.cursor", label: "Caret Motion · Next Style" },
-    Bindable { id: "settings.fx.decay", label: "Toggle Caret Decay" },
-    Bindable { id: "settings.fx.blink", label: "Toggle Caret Blink" },
-    Bindable { id: "settings.fx.reduce", label: "Toggle Reduce Motion" },
+    Bindable { id: "palette.toggle", label: "Command Palette", implemented: true },
+    Bindable { id: "settings.open", label: "Settings", implemented: true },
+    Bindable { id: "keys.open", label: "Keyboard Shortcuts", implemented: true },
+    Bindable { id: "find.toggle", label: "Find in Scrollback", implemented: true },
+    Bindable { id: "find.next", label: "Next Match", implemented: true },
+    Bindable { id: "find.previous", label: "Previous Match", implemented: true },
+    Bindable { id: "session.scroll_bottom", label: "Scroll to Bottom", implemented: true },
+    Bindable { id: "session.scroll_top", label: "Scroll to Top", implemented: true },
+    Bindable { id: "session.clear_selection", label: "Clear Selection", implemented: true },
+    Bindable { id: "blocks.next", label: "Next Command Block", implemented: true },
+    Bindable { id: "blocks.previous", label: "Previous Command Block", implemented: true },
+    Bindable { id: "settings.fx.cursor", label: "Caret Motion · Next Style", implemented: true },
+    Bindable { id: "settings.fx.decay", label: "Toggle Caret Decay", implemented: true },
+    Bindable { id: "settings.fx.blink", label: "Toggle Caret Blink", implemented: true },
+    Bindable { id: "settings.fx.reduce", label: "Toggle Reduce Motion", implemented: true },
+    Bindable { id: "settings.fx.ambient", label: "Toggle Ambient Light", implemented: true },
+    // Mica has one surface per window and no splitter. These are here because
+    // the bindings and the settings catalogue are the contract, and shipping
+    // the contract before the feature is how the feature arrives without
+    // breaking anyone's configuration.
+    Bindable { id: "session.new_tab", label: "New Tab", implemented: false },
+    Bindable { id: "session.next_tab", label: "Next Tab", implemented: false },
+    Bindable { id: "session.previous_tab", label: "Previous Tab", implemented: false },
+    Bindable { id: "pane.split_right", label: "New Pane · Right", implemented: false },
+    Bindable { id: "pane.split_left", label: "New Pane · Left", implemented: false },
+    Bindable { id: "pane.split_down", label: "New Pane · Down", implemented: false },
+    Bindable { id: "pane.split_up", label: "New Pane · Up", implemented: false },
 ];
 
 /// The chord → action table.
@@ -269,12 +294,34 @@ impl Bindings {
         let mut bind = |modifiers, key, id: &str| {
             map.insert(Chord::new(modifiers, key), id.to_owned());
         };
-        bind(cmd_shift, Key::Char('p'), "palette.toggle");
+        let cmd_opt = Modifiers { command: true, alt: true, ..Modifiers::NONE };
+        let cmd_opt_shift =
+            Modifiers { command: true, alt: true, shift: true, ..Modifiers::NONE };
+        let ctrl = Modifiers { control: true, ..Modifiers::NONE };
+        let ctrl_shift = Modifiers { control: true, shift: true, ..Modifiers::NONE };
+
+        // `F5` opens the palette and `⌘,` opens the settings file, which is
+        // the split the two things actually have: one is a list of commands,
+        // the other is a document. On a Mac with "use F1, F2 … as standard
+        // function keys" off, that is `fn-F5`. It costs the shell its `F5`
+        // (`CSI 15~`); unbind it in `[keys]` if a program needs it.
+        bind(Modifiers::NONE, Key::Function(5), "palette.toggle");
+        bind(cmd, Key::Char(','), "settings.open");
+        bind(cmd_shift, Key::Char('k'), "keys.open");
         bind(cmd, Key::Char('f'), "find.toggle");
         bind(cmd, Key::Char('g'), "find.next");
         bind(cmd_shift, Key::Char('g'), "find.previous");
-        bind(cmd, Key::Char(','), "keys.open");
         bind(cmd, Key::Down, "session.scroll_bottom");
+        bind(cmd, Key::Up, "session.scroll_top");
+        // Not yet implemented, but bound: see `BINDABLE`.
+        bind(cmd, Key::Char('t'), "session.new_tab");
+        bind(ctrl, Key::Tab, "session.next_tab");
+        bind(ctrl_shift, Key::Tab, "session.previous_tab");
+        bind(cmd_opt, Key::Right, "pane.split_right");
+        bind(cmd_opt, Key::Left, "pane.split_left");
+        bind(cmd_opt, Key::Down, "pane.split_down");
+        bind(cmd_opt, Key::Up, "pane.split_up");
+        let _ = cmd_opt_shift;
         // `⌘]` and `⌘[` rather than the arrows: `⌘↓` is scroll-to-bottom, and
         // the palette used to claim both for both.
         bind(cmd, Key::Char(']'), "blocks.next");
@@ -376,22 +423,22 @@ mod tests {
     #[test]
     fn a_shifted_letter_finds_its_binding() {
         // Regression test. `charactersIgnoringModifiers` ignores every
-        // modifier *except* Shift, so ⌘⇧P arrives as the character `P`, not
-        // `p`. The table stored `p`, the lookup asked for `P`, and the command
-        // palette simply stopped opening.
+        // modifier *except* Shift, so ⌘⇧G arrives as the character `G`, not
+        // `g`. The table stored `g`, the lookup asked for `G`, and every
+        // shifted binding simply stopped firing.
         //
         // Case belongs to Shift, which is already in the modifiers. Carrying it
         // in the character too means the same chord has two spellings.
         let bindings = Bindings::defaults();
         let shift_cmd = Modifiers { command: true, shift: true, ..Modifiers::NONE };
         assert_eq!(
-            bindings.action(Chord::new(shift_cmd, Key::Char('P'))),
-            Some("palette.toggle"),
-            "⌘⇧P as AppKit actually delivers it did not find its binding"
+            bindings.action(Chord::new(shift_cmd, Key::Char('G'))),
+            Some("find.previous"),
+            "⌘⇧G as AppKit actually delivers it did not find its binding"
         );
         assert_eq!(
-            bindings.action(Chord::new(shift_cmd, Key::Char('p'))),
-            Some("palette.toggle")
+            bindings.action(Chord::new(shift_cmd, Key::Char('g'))),
+            Some("find.previous")
         );
     }
 
@@ -445,6 +492,28 @@ mod tests {
                     chord.to_display()
                 );
             }
+        }
+    }
+
+    #[test]
+    fn space_survives_the_plus_split_grammar() {
+        // The catalogue lists `space` as a bindable key. A literal space
+        // cannot survive a `+`-separated grammar, so it has to be written out
+        // — and it has to round-trip, or the file documents a key that fails
+        // to parse the moment anyone uses it.
+        let chord = Chord::new(cmd(), Key::Char(' '));
+        assert_eq!(chord.to_config(), "cmd+space");
+        assert_eq!(Chord::parse("cmd+space"), Some(chord));
+    }
+
+    #[test]
+    fn every_modifier_spelling_the_catalogue_offers_actually_parses() {
+        let expected = Chord::new(
+            Modifiers { alt: true, command: true, ..Modifiers::NONE },
+            Key::Char('k'),
+        );
+        for text in ["alt+cmd+k", "opt+cmd+k", "option+command+k", "cmd+alt+k"] {
+            assert_eq!(Chord::parse(text), Some(expected), "`{text}` did not parse");
         }
     }
 

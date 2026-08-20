@@ -50,6 +50,46 @@ pub struct PtyConfig {
 pub const ROOT_SHELL: &str = "/bin/sh";
 
 impl PtyConfig {
+    /// A login shell, honouring `[shell]` from the settings file.
+    ///
+    /// `program` overrides `$SHELL`; `starting-dir` overrides the home
+    /// directory a login shell would otherwise choose for itself. A `~` at the
+    /// front of the directory is expanded here, because a settings file is a
+    /// document a person types into and `~/Projects` is what they will type.
+    pub fn for_shell_settings(
+        cols: u16,
+        rows: u16,
+        shell: &crate::settings::ShellSettings,
+    ) -> PtyConfig {
+        let mut config = PtyConfig::for_login_shell(cols, rows);
+        if let Some(program) = shell.program.as_deref().map(PathBuf::from) {
+            // Ignored rather than obeyed if it is not absolute or not there:
+            // a typo in the settings file must not leave the user with a
+            // terminal that cannot open a shell.
+            if program.is_absolute() && program.exists() {
+                let name = program.file_name().unwrap_or_else(|| OsStr::new("sh")).to_owned();
+                let mut argv0 = OsString::from("-");
+                argv0.push(&name);
+                config.program = program;
+                config.args = vec![argv0];
+            } else {
+                eprintln!(
+                    "mica: [shell] program = {:?} is not an absolute path to an existing \
+                     file; falling back to $SHELL",
+                    program.display()
+                );
+            }
+        }
+        if let Some(dir) = shell.starting_dir.as_deref().map(expand_tilde) {
+            if dir.is_dir() {
+                config.cwd = Some(dir);
+            } else {
+                eprintln!("mica: [shell] starting-dir = {:?} is not a directory", dir.display());
+            }
+        }
+        config
+    }
+
     /// A login shell, as a terminal is expected to start.
     pub fn for_login_shell(cols: u16, rows: u16) -> PtyConfig {
         // `/bin/sh` is the root, not `/bin/zsh`. `$SHELL` is what the user
@@ -82,6 +122,22 @@ impl PtyConfig {
     pub fn env(mut self, key: impl Into<OsString>, value: impl Into<OsString>) -> PtyConfig {
         self.env.push((key.into(), value.into()));
         self
+    }
+}
+
+/// `~` and `~/…` against `$HOME`. Anything else is returned unchanged.
+///
+/// Only the leading `~` — `~otheruser` needs the password database, and a
+/// settings file that silently resolved another user's home directory would be
+/// a surprise nobody asked for.
+fn expand_tilde(text: &str) -> PathBuf {
+    let Some(home) = std::env::var_os("HOME") else { return PathBuf::from(text) };
+    match text {
+        "~" => PathBuf::from(home),
+        _ => match text.strip_prefix("~/") {
+            Some(rest) => PathBuf::from(home).join(rest),
+            None => PathBuf::from(text),
+        },
     }
 }
 
@@ -710,5 +766,74 @@ mod root_shell_tests {
         let argv0 = config.args[0].to_string_lossy().into_owned();
         assert!(argv0.starts_with('-'), "argv[0] was {argv0:?}; a login shell needs the dash");
         assert!(config.program.is_absolute());
+    }
+}
+
+#[cfg(test)]
+mod shell_settings_tests {
+    use super::*;
+    use crate::settings::ShellSettings;
+
+    #[test]
+    fn an_absolute_existing_program_replaces_the_login_shell() {
+        let shell = ShellSettings { program: Some(ROOT_SHELL.into()), ..Default::default() };
+        let config = PtyConfig::for_shell_settings(80, 24, &shell);
+        assert_eq!(config.program, PathBuf::from(ROOT_SHELL));
+        // Still a login shell: the leading `-` is what tells it so, and losing
+        // it means the user's profile never runs.
+        assert_eq!(config.args, vec![OsString::from("-sh")]);
+    }
+
+    #[test]
+    fn a_program_that_is_not_there_falls_back_rather_than_breaking_the_terminal() {
+        // A typo in a hand-edited settings file must not leave someone with a
+        // terminal that cannot open a shell — which is the one thing they
+        // would need in order to fix the file.
+        let shell = ShellSettings {
+            program: Some("/usr/bin/definitely-not-a-shell".into()),
+            ..Default::default()
+        };
+        let config = PtyConfig::for_shell_settings(80, 24, &shell);
+        assert_eq!(config.program, PtyConfig::for_login_shell(80, 24).program);
+    }
+
+    #[test]
+    fn a_relative_program_is_refused() {
+        // `execve` does not consult `PATH`, so a relative program would fail
+        // in the post-fork window where there is nowhere to report it.
+        let shell = ShellSettings { program: Some("bash".into()), ..Default::default() };
+        let config = PtyConfig::for_shell_settings(80, 24, &shell);
+        assert_eq!(config.program, PtyConfig::for_login_shell(80, 24).program);
+    }
+
+    #[test]
+    fn a_starting_directory_expands_a_leading_tilde() {
+        let home = std::env::var("HOME").expect("HOME is set on macOS");
+        let shell = ShellSettings { starting_dir: Some("~".into()), ..Default::default() };
+        assert_eq!(
+            PtyConfig::for_shell_settings(80, 24, &shell).cwd,
+            Some(PathBuf::from(&home))
+        );
+
+        // `~otheruser` needs the password database and is deliberately not
+        // expanded; it is simply not a directory, so it is refused.
+        let shell = ShellSettings { starting_dir: Some("~nobody".into()), ..Default::default() };
+        assert_eq!(PtyConfig::for_shell_settings(80, 24, &shell).cwd, None);
+    }
+
+    #[test]
+    fn a_starting_directory_that_is_not_a_directory_is_refused() {
+        let shell =
+            ShellSettings { starting_dir: Some("/etc/hosts".into()), ..Default::default() };
+        assert_eq!(PtyConfig::for_shell_settings(80, 24, &shell).cwd, None);
+    }
+
+    #[test]
+    fn the_default_settings_change_nothing() {
+        let plain = PtyConfig::for_login_shell(80, 24);
+        let configured = PtyConfig::for_shell_settings(80, 24, &ShellSettings::default());
+        assert_eq!(plain.program, configured.program);
+        assert_eq!(plain.args, configured.args);
+        assert_eq!(plain.cwd, configured.cwd);
     }
 }

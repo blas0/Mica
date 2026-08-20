@@ -1,0 +1,290 @@
+//! The settings file Mica writes for you — a catalogue, then a configuration.
+//!
+//! `⌘,` opens this. It has two halves, and the split is the whole point:
+//!
+//! - **Config Flags** is a commented catalogue of every option Mica has and
+//!   every value each one accepts. It is regenerated on every write, so it
+//!   cannot drift from the code the way a hand-maintained example file does.
+//!   Nothing in it is live; it is there to be read and copied from.
+//! - **Config** is the live TOML, and it holds **only what differs from the
+//!   defaults**. That is not tidiness. A file that spells out every default is
+//!   a file nobody can read a diff of, and it silently pins today's defaults
+//!   forever — so a user who never touched a setting stops receiving
+//!   improvements to it.
+//!
+//! Copy a line out of the catalogue into the configuration under its section
+//! header. Uncommenting in place would land the key in whichever table
+//! happened to be open, which is a class of bug a config file should not have.
+//!
+//! ## What this module does not know
+//!
+//! Keyboard chords. The grammar for `cmd+shift+p` belongs to the window layer,
+//! which is the only layer that knows what a modifier key is — so the caller
+//! passes the key catalogue in as [`KeyDoc`]s. This crate must not learn what
+//! Command is.
+
+use crate::material::builtin_themes;
+use crate::motion::MotionStyle;
+use crate::settings::{AmbientSettings, Settings, SettingsError};
+
+/// One bindable action, as the window layer describes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyDoc {
+    /// `namespace.verb` — the key written in `[keys]`.
+    pub action: String,
+    /// What a person reads in the palette.
+    pub label: String,
+    /// The chord bound to it right now, in config spelling. Empty when the
+    /// action is deliberately unbound.
+    pub chord: String,
+    /// False for actions Mica recognises but has not implemented yet. Saying
+    /// so in the file is better than a binding that silently does nothing.
+    pub implemented: bool,
+}
+
+/// The marker lines. Kept as constants because tests and any future
+/// merge-preserving writer both need to agree on them exactly.
+pub const FLAGS_START: &str = "# Config Flags Start";
+pub const FLAGS_END: &str = "# Config Flags End";
+pub const CONFIG_START: &str = "# Config Start";
+pub const CONFIG_END: &str = "# Config End";
+
+/// Renders the whole file.
+pub fn document(settings: &Settings, keys: &[KeyDoc]) -> Result<String, SettingsError> {
+    let mut out = String::with_capacity(8 * 1024);
+
+    out.push_str("# Mica — settings\n");
+    out.push_str("#\n");
+    out.push_str("# Everything above `Config Start` is a comment: a catalogue of every\n");
+    out.push_str("# option and the values it accepts. Copy the lines you want into the\n");
+    out.push_str("# configuration below, under their section header.\n");
+    out.push_str("#\n");
+    out.push_str("# The configuration holds only what differs from the defaults, so an\n");
+    out.push_str("# untouched Mica writes an empty one. Mica rewrites this file when you\n");
+    out.push_str("# change a setting from inside the app, and regenerates the catalogue\n");
+    out.push_str("# each time — comments you add inside the configuration are not kept.\n");
+    out.push_str("#\n");
+    out.push_str("# A malformed file is reported and ignored rather than silently\n");
+    out.push_str("# discarded, so a stray bracket cannot lose your theme.\n");
+    out.push_str("#\n");
+    out.push_str("# Edits apply when Mica next becomes the active application — save\n");
+    out.push_str("# here, switch back, done. Theme, caret motion, ambient light and key\n");
+    out.push_str("# bindings take effect immediately; font, grid size, scrollback and\n");
+    out.push_str("# [shell] wait for the next launch.\n");
+    out.push('\n');
+
+    out.push_str(FLAGS_START);
+    out.push('\n');
+    flags(&mut out, keys);
+    out.push_str(FLAGS_END);
+    out.push_str("\n\n");
+
+    out.push_str(CONFIG_START);
+    out.push('\n');
+    let body = settings.serialize()?;
+    if body.trim().is_empty() {
+        out.push_str("# Nothing set — Mica is running entirely on its defaults.\n");
+    } else {
+        out.push_str(body.trim_end());
+        out.push('\n');
+    }
+    out.push_str(CONFIG_END);
+    out.push('\n');
+
+    Ok(out)
+}
+
+fn section(out: &mut String, name: &str, blurb: &str) {
+    out.push_str("#\n");
+    out.push_str(&format!("# [{name}] — {blurb}\n"));
+}
+
+fn flag(out: &mut String, key: &str, values: &str) {
+    out.push_str(&format!("#   {key:<28} {values}\n"));
+}
+
+fn flags(out: &mut String, keys: &[KeyDoc]) {
+    let d = Settings::default();
+
+    let themes = builtin_themes()
+        .iter()
+        .map(|t| t.id.clone())
+        .collect::<Vec<_>>()
+        .join(" | ");
+    section(out, "appearance", "theme, typeface, size");
+    flag(out, "theme", &format!("{themes}   (default: {})", d.theme));
+    flag(out, "font_family", "any installed monospace family   (default: JetBrains Mono)");
+    flag(out, "font_size", "points, 6.0 -> 72.0   (default: 13.0)");
+
+    section(out, "window", "the grid and the bell");
+    flag(out, "bell", "audible | visual | off   (default: off)");
+    flag(out, "columns", &format!("1 -> 500   (default: {})", d.columns));
+    flag(out, "rows", &format!("1 -> 300   (default: {})", d.rows));
+    flag(out, "scrollback", &format!("lines of history   (default: {})", d.scrollback));
+
+    section(out, "shell", "what runs, where it starts, and what a new pane inherits");
+    flag(out, "program", "absolute path   (default: $SHELL, else /bin/sh)");
+    flag(out, "starting-dir", "absolute path or ~/…   (default: your home directory)");
+    flag(out, "new-pane-from-focused-pane", "inherit | starting-dir   (default: inherit)");
+    flag(out, "focus-new-panes", "true | false   (default: true)");
+
+    section(out, "ambient", "the light behind the grid");
+    flag(out, "enabled", "true | false   (default: true)");
+    flag(
+        out,
+        "intensity",
+        &format!(
+            "{:.1} -> {:.1}   (default: {:.1} — what the toggle used to mean)",
+            AmbientSettings::RANGE.start(),
+            AmbientSettings::RANGE.end(),
+            d.ambient.intensity
+        ),
+    );
+
+    section(out, "renderer", "frame pacing and native substitutions");
+    flag(out, "frame_cap", "0 follows the display; any other value implies a timer");
+    flag(out, "substitute_progress", "true | false   (default: false)");
+    flag(out, "substitute_spinner", "true | false   (default: false)");
+
+    let styles = MotionStyle::ALL.iter().map(|s| s.id()).collect::<Vec<_>>().join(" | ");
+    section(out, "motion", "caret physics");
+    flag(out, "cursor", &format!("{styles}   (default: {})", d.motion.style.id()));
+    flag(out, "speed", "0.25 -> 4.0   (default: 1.0)");
+    flag(out, "intensity", "0.0 -> 1.0   (default: 1.0)");
+    flag(out, "decay", "true | false — the trail behind the caret");
+    flag(out, "blink", "true | false");
+    flag(out, "reduce", "true | false — also forced on by the system preference");
+
+    section(out, "keys", "action = \"chord\"");
+    out.push_str("#   Modifiers: cmd, ctrl, alt (also opt/option), shift — any order,\n");
+    out.push_str("#   joined by `+`. Mica writes them back as cmd/ctrl/alt/shift.\n");
+    out.push_str("#   Named keys: enter, tab, space, escape, backspace, delete, home, end,\n");
+    out.push_str("#   pageup, pagedown, up, down, left, right, f1 … f12.\n");
+    out.push_str("#   An empty value unbinds the action deliberately.\n");
+    out.push_str("#\n");
+    let width = keys.iter().map(|k| k.action.len()).max().unwrap_or(0).max(1);
+    for key in keys {
+        let chord = if key.chord.is_empty() { "".to_owned() } else { key.chord.clone() };
+        let note = if key.implemented { "" } else { "   (recognised, not implemented yet)" };
+        out.push_str(&format!(
+            "#   {:<width$} = {:<18} # {}{note}\n",
+            key.action,
+            format!("\"{chord}\""),
+            key.label,
+            width = width
+        ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn keys() -> Vec<KeyDoc> {
+        vec![
+            KeyDoc {
+                action: "palette.toggle".into(),
+                label: "Command Palette".into(),
+                chord: "f5".into(),
+                implemented: true,
+            },
+            KeyDoc {
+                action: "pane.split_right".into(),
+                label: "Split Right".into(),
+                chord: "cmd+d".into(),
+                implemented: false,
+            },
+        ]
+    }
+
+    #[test]
+    fn the_document_parses_as_the_settings_it_was_built_from() {
+        // The catalogue is a comment. If any of it were live TOML the file
+        // would either fail to parse or, far worse, quietly apply itself.
+        let mut s = Settings::default();
+        s.theme = "quartz".into();
+        s.ambient.intensity = 0.4;
+
+        let text = document(&s, &keys()).unwrap();
+        assert_eq!(Settings::parse(&text).unwrap(), s);
+    }
+
+    #[test]
+    fn an_untouched_install_documents_everything_and_configures_nothing() {
+        let text = document(&Settings::default(), &keys()).unwrap();
+        assert_eq!(Settings::parse(&text).unwrap(), Settings::default());
+        let config = text.split_once(CONFIG_START).unwrap().1;
+        assert!(
+            !config.contains("[appearance]"),
+            "the live configuration is writing defaults back out:\n{config}"
+        );
+    }
+
+    #[test]
+    fn every_section_appears_in_the_catalogue() {
+        let text = document(&Settings::default(), &keys()).unwrap();
+        let catalogue = text
+            .split_once(FLAGS_START)
+            .unwrap()
+            .1
+            .split_once(FLAGS_END)
+            .unwrap()
+            .0;
+        for name in
+            ["appearance", "window", "shell", "ambient", "renderer", "motion", "keys"]
+        {
+            assert!(catalogue.contains(&format!("[{name}]")), "`{name}` is undocumented");
+        }
+    }
+
+    #[test]
+    fn every_theme_and_every_caret_style_is_named() {
+        // The catalogue is generated rather than written down precisely so a
+        // new theme cannot ship undocumented.
+        let text = document(&Settings::default(), &keys()).unwrap();
+        for theme in builtin_themes() {
+            assert!(text.contains(&theme.id), "theme `{}` is missing", theme.id);
+        }
+        for style in MotionStyle::ALL {
+            assert!(text.contains(style.id()), "caret style `{}` is missing", style.id());
+        }
+    }
+
+    #[test]
+    fn an_unimplemented_binding_says_so() {
+        let text = document(&Settings::default(), &keys()).unwrap();
+        let line = text
+            .lines()
+            .find(|l| l.contains("pane.split_right"))
+            .expect("the action is missing from the catalogue");
+        assert!(line.contains("not implemented"), "{line}");
+        let live = text
+            .lines()
+            .find(|l| l.contains("palette.toggle"))
+            .expect("the action is missing from the catalogue");
+        assert!(!live.contains("not implemented"), "{live}");
+    }
+
+    #[test]
+    fn the_markers_are_exactly_where_a_reader_expects_them() {
+        let text = document(&Settings::default(), &keys()).unwrap();
+        let flags_start = text.find(FLAGS_START).unwrap();
+        let flags_end = text.find(FLAGS_END).unwrap();
+        let config_start = text.find(CONFIG_START).unwrap();
+        let config_end = text.find(CONFIG_END).unwrap();
+        assert!(flags_start < flags_end && flags_end < config_start && config_start < config_end);
+    }
+
+    #[test]
+    fn a_round_trip_through_the_document_is_stable() {
+        // Save, load, save again: the second file must equal the first, or
+        // opening the settings twice produces a spurious diff every time.
+        let mut s = Settings::default();
+        s.shell.starting_dir = Some("~/Projects".into());
+        s.shell.focus_new_panes = false;
+
+        let once = document(&s, &keys()).unwrap();
+        let reparsed = Settings::parse(&once).unwrap();
+        assert_eq!(document(&reparsed, &keys()).unwrap(), once);
+    }
+}
