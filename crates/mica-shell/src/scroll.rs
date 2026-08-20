@@ -76,6 +76,71 @@ impl ScrollAccumulator {
     }
 }
 
+/// What a scroll gesture should actually do.
+///
+/// A terminal has two entirely different things a wheel can mean, and which one
+/// applies is not a preference — it is a property of what is on screen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScrollTarget {
+    /// Move the viewport through scrollback. The normal screen.
+    Viewport(i32),
+    /// Send arrow keys to the child. The alternate screen has no scrollback to
+    /// move through, so the only honest translation of "scroll up" is the
+    /// keystroke the program already understands.
+    Keys(Vec<u8>),
+    /// Do nothing. The program asked for mouse events itself; inventing
+    /// keystrokes would make a scroll gesture edit a file in `vim`.
+    Nothing,
+}
+
+/// Arrow keys, in the spelling the terminal's cursor-key mode requires.
+///
+/// This is xterm's `alternateScroll` (private mode 1007), on by default there
+/// and in every terminal anyone actually uses. Without it, scrolling inside
+/// `less`, `vim`, `htop` — or a full-screen CLI like `claude` — does nothing at
+/// all, which is exactly the symptom that sent me looking.
+///
+/// Capped because a trackpad flick can produce a hundred lines in one event,
+/// and a hundred arrow keys arriving at a program that redraws on each one is a
+/// visible stall. Three screens of movement per event is already more than a
+/// hand can ask for.
+pub fn alternate_scroll(lines: i32, application_cursor: bool) -> ScrollTarget {
+    const MAX_KEYS: i32 = 96;
+    if lines == 0 {
+        return ScrollTarget::Nothing;
+    }
+    let up = lines > 0;
+    let count = lines.unsigned_abs().min(MAX_KEYS as u32) as usize;
+    // DECCKM: `ESC O A` when the application asked for it, `ESC [ A` otherwise.
+    // Sending the wrong one is not cosmetic — `less` ignores the form it did
+    // not ask for, so the scroll silently does nothing.
+    let key: &[u8] = match (application_cursor, up) {
+        (true, true) => b"\x1bOA",
+        (true, false) => b"\x1bOB",
+        (false, true) => b"\x1b[A",
+        (false, false) => b"\x1b[B",
+    };
+    let mut out = Vec::with_capacity(key.len() * count);
+    for _ in 0..count {
+        out.extend_from_slice(key);
+    }
+    ScrollTarget::Keys(out)
+}
+
+/// Routes one gesture, given what the terminal is currently doing.
+pub fn route(
+    lines: i32,
+    modes: mica_core::backend::TerminalModes,
+) -> ScrollTarget {
+    if !modes.alt_screen {
+        return ScrollTarget::Viewport(lines);
+    }
+    if modes.mouse_reporting {
+        return ScrollTarget::Nothing;
+    }
+    alternate_scroll(lines, modes.application_cursor)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,5 +237,65 @@ mod tests {
         a.lines(8.0, true, CELL);
         a.reset();
         assert_eq!(a.lines(8.0, true, CELL), 0, "a stale fraction survived the reset");
+    }
+}
+
+#[cfg(test)]
+mod alternate_screen_tests {
+    use super::*;
+    use mica_core::backend::TerminalModes;
+
+    fn modes(alt: bool, app: bool, mouse: bool) -> TerminalModes {
+        TerminalModes { alt_screen: alt, application_cursor: app, mouse_reporting: mouse }
+    }
+
+    #[test]
+    fn the_normal_screen_scrolls_the_viewport() {
+        assert_eq!(route(3, modes(false, false, false)), ScrollTarget::Viewport(3));
+        // Even with application cursor keys on: DECCKM says nothing about
+        // whether there is scrollback.
+        assert_eq!(route(-2, modes(false, true, false)), ScrollTarget::Viewport(-2));
+    }
+
+    #[test]
+    fn the_alternate_screen_sends_arrow_keys() {
+        assert_eq!(
+            route(2, modes(true, false, false)),
+            ScrollTarget::Keys(b"\x1b[A\x1b[A".to_vec()),
+            "scrolling up in a full-screen program must send Up, not move a \
+             viewport that does not exist"
+        );
+        assert_eq!(route(-1, modes(true, false, false)), ScrollTarget::Keys(b"\x1b[B".to_vec()));
+    }
+
+    #[test]
+    fn application_cursor_mode_changes_the_spelling() {
+        // `less` reads `ESC O A` and ignores `ESC [ A`. Getting this wrong is
+        // indistinguishable from not implementing the feature.
+        assert_eq!(route(1, modes(true, true, false)), ScrollTarget::Keys(b"\x1bOA".to_vec()));
+        assert_eq!(route(-1, modes(true, true, false)), ScrollTarget::Keys(b"\x1bOB".to_vec()));
+    }
+
+    #[test]
+    fn a_program_tracking_the_mouse_is_left_alone() {
+        assert_eq!(
+            route(5, modes(true, false, true)),
+            ScrollTarget::Nothing,
+            "inventing arrow keys under a program that reads the mouse itself \
+             would make a scroll gesture edit the file"
+        );
+    }
+
+    #[test]
+    fn a_flick_cannot_send_an_unbounded_burst_of_keys() {
+        let ScrollTarget::Keys(bytes) = route(10_000, modes(true, false, false)) else {
+            panic!("the alternate screen should have produced keys");
+        };
+        assert_eq!(bytes.len(), 96 * 3, "a single flick queued {} bytes", bytes.len());
+    }
+
+    #[test]
+    fn a_gesture_that_rounded_to_nothing_sends_nothing() {
+        assert_eq!(route(0, modes(true, false, false)), ScrollTarget::Nothing);
     }
 }

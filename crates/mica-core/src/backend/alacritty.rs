@@ -31,7 +31,7 @@ use alacritty_terminal::vte::ansi::{
 };
 
 use crate::backend::mirror::Mirror;
-use crate::backend::{CursorShape, CursorState, Point, RowRef, Selection, TerminalCore};
+use crate::backend::{CursorShape, CursorState, Point, RowRef, Selection, TerminalCore, TerminalModes};
 use crate::cell::{Cell, CellContent, CellFlags, Color, NO_EXTRA};
 use crate::semantic::{OscSniffer, SemanticEvent};
 use crate::sidetable::{Extras, SideTables};
@@ -295,6 +295,15 @@ impl TerminalCore for AlacrittyCore {
 
     fn clear_damage(&mut self) {
         self.mirror.clear_damage();
+    }
+
+    fn modes(&self) -> TerminalModes {
+        let mode = self.term.mode();
+        TerminalModes {
+            alt_screen: mode.contains(TermMode::ALT_SCREEN),
+            application_cursor: mode.contains(TermMode::APP_CURSOR),
+            mouse_reporting: mode.intersects(TermMode::MOUSE_MODE),
+        }
     }
 
     fn cursor(&self) -> CursorState {

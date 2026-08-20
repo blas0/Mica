@@ -555,10 +555,25 @@ impl Surface {
         let _ = self.session.write_input(bytes);
     }
 
+    /// One scroll gesture, already converted to whole lines.
+    ///
+    /// Positive is toward history. What this *does* depends on what is on
+    /// screen — see [`crate::scroll::route`]. On the alternate screen there is
+    /// no scrollback to move through, so the gesture becomes arrow keys; that
+    /// is the whole reason scrolling inside a full-screen CLI used to do
+    /// nothing at all.
     pub fn scroll(&mut self, delta: i32) {
-        self.session.scroll(delta);
-        if self.session.has_damage() {
-            self.renderer.scheduler().request(Reason::Damage);
+        match crate::scroll::route(delta, self.session.modes()) {
+            crate::scroll::ScrollTarget::Viewport(lines) => {
+                self.session.scroll(lines);
+                if self.session.has_damage() {
+                    self.renderer.scheduler().request(Reason::Damage);
+                }
+            }
+            crate::scroll::ScrollTarget::Keys(bytes) => {
+                self.write_input(&bytes);
+            }
+            crate::scroll::ScrollTarget::Nothing => {}
         }
     }
 

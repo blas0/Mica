@@ -10,7 +10,7 @@
 use std::io;
 use std::sync::mpsc::{Receiver, TryRecvError};
 
-use crate::backend::{Backend, CursorState, RowRef, Selection, TerminalCore};
+use crate::backend::{Backend, CursorState, RowRef, Selection, TerminalCore, TerminalModes};
 use crate::pty::{ExitStatus, Pty, PtyConfig, PtyEvent};
 use crate::semantic::{Block, BlockTracker, SemanticEvent};
 use crate::settings::Settings;
@@ -188,6 +188,11 @@ impl Session {
         self.rows = rows;
         self.core.resize(cols, rows);
         self.pty.resize(cols, rows)
+    }
+
+    /// The DEC private modes currently set. See [`TerminalModes`].
+    pub fn modes(&self) -> TerminalModes {
+        self.core.modes()
     }
 
     pub fn scroll(&mut self, delta: i32) {

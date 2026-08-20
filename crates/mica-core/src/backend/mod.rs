@@ -96,6 +96,26 @@ pub struct Selection {
     pub rectangular: bool,
 }
 
+/// DEC private modes the *window* layer has to know about.
+///
+/// Deliberately three booleans rather than a handle to the backend's own mode
+/// set: the window layer needs to answer two questions — "is a full-screen
+/// program on screen?" and "how does it spell an arrow key?" — and giving it
+/// anything more would let terminal-emulator detail leak into AppKit code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TerminalModes {
+    /// DECSET 1049. A full-screen program owns the screen; there is no
+    /// scrollback to move through, so a scroll gesture has to mean something
+    /// else or mean nothing.
+    pub alt_screen: bool,
+    /// DECCKM. Arrow keys are `ESC O A` rather than `ESC [ A`.
+    pub application_cursor: bool,
+    /// Any of the mouse-tracking modes. The program is listening for the
+    /// pointer itself, so the terminal must not invent keystrokes on its
+    /// behalf.
+    pub mouse_reporting: bool,
+}
+
 /// What a renderer needs from a terminal, and nothing more.
 ///
 /// Deliberately not object-safe: there is exactly one backend per build, chosen
@@ -132,6 +152,9 @@ pub trait TerminalCore: Sized {
     fn clear_damage(&mut self);
 
     fn cursor(&self) -> CursorState;
+
+    /// The DEC private modes the window layer needs. See [`TerminalModes`].
+    fn modes(&self) -> TerminalModes;
 
     fn selection(&self) -> Option<Selection>;
     fn set_selection(&mut self, selection: Option<Selection>);
