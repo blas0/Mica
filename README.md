@@ -70,6 +70,15 @@ Verified end to end: a real shell on a real Metal device, polled 1200 times as a
 120 Hz display would, submits **zero** additional command buffers. The running
 app measures 0.0% CPU while idle.
 
+The corollary is that the frames it *does* draw must not block. The window
+renders through `Renderer::render_to_drawable`, which schedules the present on
+the command buffer and returns; `render_to_texture` is its offscreen twin, ends
+in `waitUntilCompleted`, and is for tests that read pixels back. Rendering a
+window through the offscreen path costs 36.9 ms per frame in `nextDrawable`
+alone — the drawable is held for the whole GPU execution — against 16.5 ms, one
+vsync, for the live path. Nothing in the type system tells the two apart, so
+`tests/live_render_path.rs` does.
+
 **2. There is no `full_grid()` on the `TerminalCore` trait, and there must never
 be one.** The moment it exists, something calls it every frame and the property
 above dies quietly. A renderer that needs everything calls `damage_all()` — an

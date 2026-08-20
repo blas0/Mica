@@ -25,11 +25,11 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use objc2::rc::Retained;
+use objc2::runtime::ProtocolObject;
 use objc2::{define_class, msg_send, DeclaredClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSView};
 use objc2_core_foundation::CGSize;
 use objc2_foundation::{NSNotification, NSObjectProtocol, NSRect, NSSize};
-use objc2_metal::MTLDrawable;
 use objc2_quartz_core::{CALayer, CAMetalDrawable, CAMetalLayer};
 
 use mica_core::session::SessionEvent;
@@ -180,8 +180,17 @@ define_class!(
                 layer.setMaximumDrawableCount(2);
                 // Present in the same transaction as the layer tree, so a
                 // resize does not show a frame of stale content.
-                layer.setPresentsWithTransaction(true);
-                layer.setAllowsNextDrawableTimeout(false);
+                // **Not** `presentsWithTransaction`. That mode defers the
+                // present to the next Core Animation transaction commit, so
+                // the drawable is not reclaimed until the run loop turns —
+                // which, with two drawables, meant `nextDrawable` blocking the
+                // main thread for 36.9 ms a frame. It buys a resize with no
+                // stale frame; the price was five frames a second.
+                layer.setPresentsWithTransaction(false);
+                // Let a wedged GPU time out and hand back nil, which `draw`
+                // already treats as a frame still owed. The alternative is
+                // waiting forever with the main thread held.
+                layer.setAllowsNextDrawableTimeout(true);
             }
             Retained::into_super(layer)
         }
@@ -452,11 +461,12 @@ impl MicaView {
         };
 
         let texture = unsafe { drawable.texture() };
-        if surface.render_to_texture(&texture).is_ok() {
+        // The present is scheduled on the command buffer rather than performed
+        // here, so nothing on the main thread waits for the GPU. Core
+        // Animation hands the drawable back when the frame is actually done.
+        let as_drawable = ProtocolObject::from_ref(&*drawable);
+        if surface.render_to_drawable(as_drawable, &texture).is_ok() {
             surface.scheduler().begin_frame();
-            // `presentsWithTransaction` means presenting is a synchronous act
-            // inside the current CATransaction rather than a scheduled one.
-            unsafe { drawable.present() };
             surface.scheduler().end_frame();
         }
     }

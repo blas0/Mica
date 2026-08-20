@@ -15,7 +15,7 @@ use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSString;
 use objc2_metal::{
     MTLBlitCommandEncoder, MTLBuffer, MTLClearColor, MTLCommandBuffer, MTLCommandEncoder,
-    MTLCommandQueue,
+    MTLCommandQueue, MTLDrawable,
     MTLLoadAction, MTLRenderCommandEncoder, MTLRenderPassDescriptor, MTLRenderPipelineState,
     MTLStoreAction, MTLTexture,
 };
@@ -103,10 +103,46 @@ impl Renderer {
         Ok(())
     }
 
+    /// Renders into a drawable and returns immediately.
+    ///
+    /// **This is the live path, and the "returns immediately" is the whole
+    /// point of it.** The window used to render through
+    /// [`Renderer::render_to_texture`], which ends in `waitUntilCompleted` and
+    /// a `synchronizeResource` blit — both correct for reading pixels back in
+    /// a test, both ruinous for a window. Measured on this machine, the main
+    /// thread spent **36.9 ms in `nextDrawable` per frame** because the
+    /// drawable was held for the whole GPU execution and only handed back to
+    /// Core Animation afterwards. That is five frames a second, with every
+    /// keystroke queued behind one of those waits.
+    ///
+    /// Here the present is scheduled *on the command buffer*, so Core
+    /// Animation reclaims the drawable when the GPU is finished with it and
+    /// nothing on the main thread waits for anything.
+    pub fn render_to_drawable(
+        &mut self,
+        drawable: &ProtocolObject<dyn MTLDrawable>,
+        target: &ProtocolObject<dyn MTLTexture>,
+        uniforms: Uniforms,
+        substrate: SubstrateUniforms,
+    ) -> Result<(), GpuError> {
+        let command_buffer =
+            self.context.queue().commandBuffer().ok_or(GpuError::BufferFailed)?;
+        command_buffer.setLabel(Some(&NSString::from_str("mica.frame")));
+
+        self.encode(&command_buffer, target, uniforms, substrate)?;
+
+        // No blit synchronise: a drawable's texture is private and
+        // framebuffer-only, nobody is reading it back, and asking Metal to
+        // sync it is asking for work that has no consumer.
+        command_buffer.presentDrawable(drawable);
+        command_buffer.commit();
+        Ok(())
+    }
+
     /// Renders into an arbitrary texture and blocks until it is done.
     ///
-    /// Used by tests and by frame capture. The live path is
-    /// [`Renderer::render_to_drawable`], which does not block.
+    /// For tests and frame capture, where the point *is* to read the pixels
+    /// back. Not for the window — see [`Renderer::render_to_drawable`].
     pub fn render_to_texture(
         &mut self,
         target: &ProtocolObject<dyn MTLTexture>,

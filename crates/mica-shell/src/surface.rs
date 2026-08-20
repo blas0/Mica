@@ -733,6 +733,23 @@ impl Surface {
 
     /// Renders into a texture. Used by the window layer with a drawable's
     /// texture, and by tests with an offscreen one.
+    /// Renders one frame into a drawable and returns without waiting.
+    ///
+    /// The live path. `render_to_texture` is the offscreen twin, kept for
+    /// tests that read pixels back.
+    pub fn render_to_drawable(
+        &mut self,
+        drawable: &objc2::runtime::ProtocolObject<dyn objc2_metal::MTLDrawable>,
+        target: &objc2::runtime::ProtocolObject<dyn objc2_metal::MTLTexture>,
+    ) -> Result<(), SurfaceError> {
+        self.build_frame();
+        self.renderer.sync_atlas(&mut self.atlas)?;
+        let (uniforms, substrate) = (self.uniforms(), self.substrate());
+        self.renderer.render_to_drawable(drawable, target, uniforms, substrate)?;
+        self.session.clear_damage();
+        Ok(())
+    }
+
     pub fn render_to_texture(
         &mut self,
         target: &objc2::runtime::ProtocolObject<dyn objc2_metal::MTLTexture>,
