@@ -560,7 +560,7 @@ impl Surface {
     fn open_settings_file(&mut self) -> bool {
         let path = self.settings_path.clone();
         let keys = crate::config::key_docs(&self.bindings);
-        if let Err(error) = crate::config::ensure(&path, &self.settings, &keys) {
+        if let Err(error) = crate::config::refresh(&path, &self.settings, &keys) {
             eprintln!("mica: could not write {}: {error}", path.display());
             return true;
         }

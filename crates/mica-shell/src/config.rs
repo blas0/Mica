@@ -50,6 +50,35 @@ pub fn ensure(path: &Path, settings: &Settings, keys: &[KeyDoc]) -> std::io::Res
         .map_err(|e| std::io::Error::other(e.to_string()))
 }
 
+/// Brings the file up to date before it is opened.
+///
+/// The file is complete by design — every setting, every binding, spelled out —
+/// which is only true if it is rewritten when the set of settings changes. So
+/// `⌘,` re-renders it from its own contents: values the user has edited are
+/// read back and written out again, and anything Mica has learned to configure
+/// since the file was written appears at its default.
+///
+/// Two things it deliberately will not do. It will not touch a file it cannot
+/// parse — a stray bracket should be handed back to the user to fix, not
+/// overwritten with defaults. And it will not rewrite a file that is already
+/// exactly right, so opening Settings twice does not disturb the mtime.
+pub fn refresh(path: &Path, fallback: &Settings, keys: &[KeyDoc]) -> std::io::Result<()> {
+    let existing = std::fs::read_to_string(path).ok();
+    let settings = match existing.as_deref().map(Settings::parse) {
+        Some(Ok(parsed)) => parsed,
+        // Unreadable: leave it exactly as it is and let the editor show it.
+        Some(Err(_)) => return Ok(()),
+        None => fallback.clone(),
+    };
+
+    let wanted = mica_core::reference::document(&settings, keys)
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    if existing.as_deref() == Some(wanted.as_str()) {
+        return Ok(());
+    }
+    settings.save(path, keys).map_err(|e| std::io::Error::other(e.to_string()))
+}
+
 /// Hands the file to whatever the user opens text with.
 ///
 /// `open -t` rather than an in-app editor: writing a text editor is not what a
@@ -127,12 +156,69 @@ mod tests {
         ensure(&file, &Settings::default(), &keys).unwrap();
         let first = std::fs::read_to_string(&file).unwrap();
         assert!(first.contains(mica_core::reference::FLAGS_START));
-        assert_eq!(Settings::parse(&first).unwrap(), Settings::default());
+
+        // The written file spells its defaults out, bindings included, so what
+        // comes back is the defaults with the whole key table attached.
+        let parsed = Settings::parse(&first).unwrap();
+        let expected = Settings {
+            keys: keys.iter().map(|k| (k.action.clone(), k.chord.clone())).collect(),
+            ..Settings::default()
+        };
+        assert_eq!(parsed, expected);
+
+        // And re-reading it has to reproduce the bindings it was written from,
+        // or a first launch would quietly rebind the app to itself.
+        assert_eq!(key_docs(&Bindings::from_overrides(&parsed.keys)), keys);
 
         // A second call must not clobber whatever the user has since written.
         std::fs::write(&file, "[appearance]\ntheme = \"basalt\"\n").unwrap();
         ensure(&file, &Settings::default(), &keys).unwrap();
         assert_eq!(Settings::load(&file).unwrap().theme, "basalt");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn opening_settings_brings_an_older_file_up_to_date_without_losing_its_values() {
+        // The file promises to be complete. A file written before a setting
+        // existed is not, so opening Settings has to re-render it — carrying
+        // the values the user chose, filling in the rest.
+        let dir = std::env::temp_dir().join(format!("mica-refresh-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("settings.toml");
+        let keys = key_docs(&Bindings::defaults());
+
+        std::fs::write(&file, "[appearance]\ntheme = \"basalt\"\n").unwrap();
+        refresh(&file, &Settings::default(), &keys).unwrap();
+
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.contains(mica_core::reference::FLAGS_START), "the catalogue is missing");
+        assert!(text.contains("theme = \"basalt\""), "the user's theme was lost:\n{text}");
+        assert!(text.contains("[ambient]"), "the new section was not filled in:\n{text}");
+
+        // Idempotent: a second open must not rewrite it.
+        let before = std::fs::metadata(&file).unwrap().modified().unwrap();
+        refresh(&file, &Settings::default(), &keys).unwrap();
+        assert_eq!(std::fs::metadata(&file).unwrap().modified().unwrap(), before);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), text);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_that_does_not_parse_is_handed_back_untouched() {
+        // Overwriting it with defaults would silently discard the settings the
+        // user was in the middle of editing.
+        let dir = std::env::temp_dir().join(format!("mica-broken-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("settings.toml");
+
+        let broken = "[appearance\ntheme = \"basalt\"\n";
+        std::fs::write(&file, broken).unwrap();
+        refresh(&file, &Settings::default(), &key_docs(&Bindings::defaults())).unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), broken);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

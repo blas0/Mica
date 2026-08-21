@@ -1,10 +1,15 @@
 //! `~/.config/mica/settings.toml`.
 //!
-//! One readable TOML file, hand-editable, committable, shareable — and it
-//! **only ever contains values that differ from the defaults**. That is not a
-//! cosmetic choice: a settings file that spells out every default is a file
-//! nobody can read a diff of, and it silently pins today's defaults forever, so
-//! a user who never touched a setting stops receiving improvements to it.
+//! One readable TOML file, hand-editable, committable, shareable, and written
+//! out **in full**: every setting appears with its current value, defaults
+//! included, so the file you open is the whole state of the app rather than a
+//! list of the things you happened to change.
+//!
+//! The cost of that is real and worth naming. A file that spells out every
+//! default pins today's defaults: change a default in the code and an
+//! untouched install keeps the old value, because it is no longer untouched.
+//! [`Settings::to_file`] still produces the differences-only shape, and is what
+//! a future "reset to defaults" or an export would want.
 //!
 //! The on-disk shape ([`SettingsFile`], all-optional) and the resolved shape
 //! ([`Settings`], no optionals) are separate types. Everything downstream reads
@@ -433,14 +438,69 @@ impl Settings {
         }
     }
 
+    /// Every setting, present. This is the shape written to disk.
+    ///
+    /// The two `Option` fields in `[shell]` have no fixed default to print —
+    /// the shell follows `$SHELL` and the directory follows `$HOME`, both
+    /// resolved at launch. They are written as an empty string, which
+    /// [`Settings::from_file`] reads back as unset, so the round trip holds and
+    /// the key is still there to edit.
+    pub fn to_file_complete(&self) -> SettingsFile {
+        SettingsFile {
+            appearance: Some(Appearance {
+                theme: Some(self.theme.clone()),
+                font_family: Some(self.font_family.clone()),
+                font_size: Some(self.font_size),
+            }),
+            window: Some(Window {
+                bell: Some(self.bell),
+                columns: Some(self.columns),
+                rows: Some(self.rows),
+                scrollback: Some(self.scrollback),
+            }),
+            renderer: Some(Renderer {
+                frame_cap: Some(self.frame_cap),
+                substitute_progress: Some(self.substitute_progress),
+                substitute_spinner: Some(self.substitute_spinner),
+            }),
+            motion: Some(Motion {
+                reduce: Some(self.motion.reduce),
+                cursor: Some(self.motion.style.id().to_owned()),
+                speed: Some(self.motion.speed),
+                intensity: Some(self.motion.intensity),
+                decay: Some(self.motion.decay),
+                blink: Some(self.motion.blink),
+            }),
+            ambient: Some(Ambient {
+                enabled: Some(self.ambient.enabled),
+                intensity: Some(self.ambient.intensity),
+            }),
+            shell: Some(Shell {
+                program: Some(self.shell.program.clone().unwrap_or_default()),
+                starting_dir: Some(self.shell.starting_dir.clone().unwrap_or_default()),
+                new_pane_from_focused_pane: Some(self.shell.new_pane_origin),
+                focus_new_panes: Some(self.shell.focus_new_panes),
+            }),
+            keys: Some(self.keys.clone()),
+        }
+    }
+
     pub fn parse(text: &str) -> Result<Settings, SettingsError> {
         let file: SettingsFile =
             toml::from_str(text).map_err(|e| SettingsError::Parse(e.to_string()))?;
         Ok(Settings::from_file(&file))
     }
 
+    /// The differences-only shape, as TOML. Not what gets written to disk —
+    /// see [`crate::reference::document`] for that.
     pub fn serialize(&self) -> Result<String, SettingsError> {
         toml::to_string_pretty(&self.to_file())
+            .map_err(|e| SettingsError::Serialize(e.to_string()))
+    }
+
+    /// Every setting, as TOML. The body of the `Config` section.
+    pub fn serialize_complete(&self) -> Result<String, SettingsError> {
+        toml::to_string_pretty(&self.to_file_complete())
             .map_err(|e| SettingsError::Serialize(e.to_string()))
     }
 
