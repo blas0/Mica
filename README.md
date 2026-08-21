@@ -2,7 +2,8 @@
 Terminal emulator focused on smooth motion and lightweight rendering.
 
 ![Static Badge](https://img.shields.io/badge/Apple%20Frameworks-black?logo=apple)
-![Static Badge](https://img.shields.io/badge/Rust-orange?logo=rust)
+![Static Badge](https://img.shields.io/badge/Zig-orange?logo=zig)
+![Static Badge](https://img.shields.io/badge/Rust-darkorange?logo=rust)
 
 ### Mission
 
