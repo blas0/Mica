@@ -2011,20 +2011,26 @@ mod tests {
     }
 
     #[test]
-    fn the_palette_offers_only_actions_that_do_something() {
-        // Tabs are bindable and documented; Mica has no tab bar. Listing them
-        // in the palette would be offering a command that does nothing when
-        // you pick it. Panes used to be in that list and are not any more,
-        // which is what makes this test worth keeping either way.
+    fn the_palette_offers_exactly_the_actions_that_do_something() {
+        // The palette is a list of things you can pick. An entry that does
+        // nothing when you pick it is the failure; an implemented action
+        // missing from the list is the other one. Both are checked here
+        // because `BINDABLE` is the single source for both directions.
         let mut s = surface("palette-real");
         s.toggle_palette();
         let ids: Vec<&str> = s.palette().actions().iter().map(|a| a.id.as_str()).collect();
-        assert!(ids.contains(&"find.toggle"));
-        assert!(ids.contains(&"pane.split_right"), "panes are implemented and still hidden");
-        assert!(
-            !ids.contains(&"session.new_tab"),
-            "the palette is advertising a feature that does not exist"
-        );
+
+        for bindable in crate::bindings::BINDABLE {
+            let listed = ids.contains(&bindable.id);
+            assert_eq!(
+                listed, bindable.implemented,
+                "`{}` is {} in BINDABLE and {} in the palette",
+                bindable.id,
+                if bindable.implemented { "implemented" } else { "not implemented" },
+                if listed { "listed" } else { "missing" }
+            );
+        }
+        assert!(ids.contains(&"find.toggle"), "the palette came up empty");
     }
 
     #[test]

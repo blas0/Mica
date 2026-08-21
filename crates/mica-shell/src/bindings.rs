@@ -266,13 +266,12 @@ pub const BINDABLE: &[Bindable] = &[
     Bindable { id: "pane.focus_down", label: "Focus Pane · Down", implemented: true },
     Bindable { id: "pane.focus_up", label: "Focus Pane · Up", implemented: true },
     Bindable { id: "pane.close", label: "Close Pane", implemented: true },
-    // Mica has one window per surface and no tab bar. These are here because
-    // the bindings and the settings catalogue are the contract, and shipping
-    // the contract before the feature is how the feature arrives without
-    // breaking anyone's configuration.
-    Bindable { id: "session.new_tab", label: "New Tab", implemented: false },
-    Bindable { id: "session.next_tab", label: "Next Tab", implemented: false },
-    Bindable { id: "session.previous_tab", label: "Previous Tab", implemented: false },
+    // Tabs are AppKit's own: each one is a real window with its own shell.
+    // The window layer answers these, not the surface — see
+    // `MicaView::window_action`.
+    Bindable { id: "session.new_tab", label: "New Tab", implemented: true },
+    Bindable { id: "session.next_tab", label: "Next Tab", implemented: true },
+    Bindable { id: "session.previous_tab", label: "Previous Tab", implemented: true },
 ];
 
 /// The chord → action table.
@@ -318,7 +317,6 @@ impl Bindings {
         bind(cmd_shift, Key::Char('g'), "find.previous");
         bind(cmd, Key::Down, "session.scroll_bottom");
         bind(cmd, Key::Up, "session.scroll_top");
-        // Not yet implemented, but bound: see `BINDABLE`.
         bind(cmd, Key::Char('t'), "session.new_tab");
         bind(ctrl, Key::Tab, "session.next_tab");
         bind(ctrl_shift, Key::Tab, "session.previous_tab");

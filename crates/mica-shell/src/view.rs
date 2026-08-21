@@ -346,6 +346,14 @@ define_class!(
     }
 );
 
+/// The actions the window answers rather than the surface.
+///
+/// Named in one place because `BINDABLE` claims every one of them is
+/// implemented, and the test that checks that claim has to know which half of
+/// the app to look in.
+pub const WINDOW_ACTIONS: [&str; 3] =
+    ["session.new_tab", "session.next_tab", "session.previous_tab"];
+
 impl MicaView {
     /// An event's location in this view, in points from the **top** left.
     ///
@@ -615,10 +623,42 @@ impl MicaView {
         else {
             return false;
         };
-        if !surface.dispatch(&id) {
+        if !surface.dispatch(&id) && !self.window_action(&id) {
             eprintln!("mica: action `{id}` is bound but not implemented");
         }
         true
+    }
+
+    /// Actions the surface cannot perform because they are about the window,
+    /// not the terminal inside it.
+    ///
+    /// Tabs are AppKit's: each one is a real `NSWindow` with its own shell,
+    /// scrollback and working directory, and the tab bar, its overflow menu
+    /// and full-screen behaviour come with it. A hand-rolled bar would be a
+    /// worse copy of a control the user already knows.
+    fn window_action(&self, id: &str) -> bool {
+        let mtm = MainThreadMarker::from(self);
+        let Some(window) = self.window() else { return false };
+        match id {
+            "session.new_tab" => {
+                let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
+                let Some(delegate) = app.delegate() else { return false };
+                let Ok(delegate) = delegate.downcast::<crate::app::AppDelegate>() else {
+                    return false;
+                };
+                delegate.open_window_beside(mtm, Some(&window));
+                true
+            }
+            "session.next_tab" => {
+                unsafe { window.selectNextTab(None) };
+                true
+            }
+            "session.previous_tab" => {
+                unsafe { window.selectPreviousTab(None) };
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Routes a key to the shortcut panel, if it is open.
@@ -656,7 +696,7 @@ impl MicaView {
             }
             keycode::RETURN | keycode::KEYPAD_ENTER => {
                 if let Some(id) = surface.overlay_accept() {
-                    if !surface.dispatch(&id) {
+                    if !surface.dispatch(&id) && !self.window_action(&id) {
                         eprintln!("mica: action `{id}` is not implemented yet");
                     }
                 }

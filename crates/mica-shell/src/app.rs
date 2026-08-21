@@ -19,7 +19,8 @@ use objc2::{define_class, msg_send, DeclaredClass, MainThreadMarker, MainThreadO
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType,
     NSMenu, NSMenuItem, NSPasteboard, NSPasteboardTypeString, NSWindow,
-    NSWindowCollectionBehavior, NSWindowDelegate, NSWindowStyleMask, NSWindowTabbingMode,
+    NSWindowCollectionBehavior, NSWindowDelegate, NSWindowOrderingMode, NSWindowStyleMask,
+    NSWindowTabbingMode,
     NSWorkspace,
 };
 use objc2_foundation::{
@@ -191,6 +192,16 @@ impl AppDelegate {
 
     /// Opens a window with a fresh shell in it.
     pub fn open_window(&self, mtm: MainThreadMarker) {
+        self.open_window_beside(mtm, None);
+    }
+
+    /// Opens a terminal, optionally as a tab of an existing window.
+    ///
+    /// `addTabbedWindow:` rather than trusting `tabbingMode` alone: whether a
+    /// new window joins the key window's tab group otherwise depends on the
+    /// user's "prefer tabs" system setting, and `⌘T` has to mean a tab
+    /// regardless of what that is set to.
+    pub fn open_window_beside(&self, mtm: MainThreadMarker, sibling: Option<&NSWindow>) {
         let settings = self.ivars().settings.borrow().clone();
         let index = {
             let mut next = self.ivars().next_session.borrow_mut();
@@ -274,8 +285,16 @@ impl AppDelegate {
         }
 
         unsafe {
-            window.center();
-            window.makeKeyAndOrderFront(None);
+            match sibling {
+                Some(sibling) => {
+                    sibling.addTabbedWindow_ordered(&window, NSWindowOrderingMode::Above);
+                    window.makeKeyAndOrderFront(None);
+                }
+                None => {
+                    window.center();
+                    window.makeKeyAndOrderFront(None);
+                }
+            }
         }
         view.pump();
         self.ivars().windows.borrow_mut().push(window);
