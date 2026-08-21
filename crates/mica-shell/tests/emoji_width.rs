@@ -20,10 +20,16 @@
 //! shifts the rest of its line one column left of where the program placed it,
 //! and box-drawn frames come apart.
 //!
-//! It is fixed by the `ghostty` backend, which measures grapheme clusters
-//! rather than scalars. That backend is written and gated behind a Zig
-//! toolchain that is not installed. This test is the exit criterion: when it
-//! passes without `--ignored`, the bug is gone.
+//! It is fixed by the `ghostty` backend — but not simply by swapping to it.
+//! Measured against a built `libghostty-vt`: out of the box it gives `⚠️` one
+//! column too. What fixes it is DEC mode **2027**, grapheme clustering, under
+//! which VS16 widens the cluster. alacritty has no 2027 at all, which is what
+//! makes this a backend change rather than an escape sequence Mica could send
+//! today. See the module documentation in
+//! `crates/mica-core/src/backend/ghostty.rs` for the measurement.
+//!
+//! This test is the exit criterion: when it passes without `--ignored`, the
+//! bug is gone.
 
 use std::time::{Duration, Instant};
 
@@ -54,7 +60,7 @@ fn widths_of_row_with(s: &mut Surface, marker: char) -> Option<Vec<u8>> {
 }
 
 #[test]
-#[ignore = "needs the ghostty backend: alacritty measures scalars, not clusters"]
+#[ignore = "needs the ghostty backend with mode 2027: alacritty measures scalars, not clusters"]
 fn an_emoji_presentation_sequence_occupies_two_columns() {
     let root = std::env::temp_dir().join(format!("mica-emoji-width-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
