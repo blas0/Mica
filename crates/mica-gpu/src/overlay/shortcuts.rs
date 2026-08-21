@@ -40,6 +40,21 @@ pub struct ShortcutView<'a> {
     pub notice: Option<&'a str>,
 }
 
+
+/// What the panel says it can do, and how loudly.
+///
+/// Named keys, not drawn ones. `⌫` and `⎋` are the correct symbols and they
+/// are what the keycaps say, but at footer size in a monospace face they read
+/// as a circled cross and a circular arrow — neither obviously the key you are
+/// meant to press. The arrows survive that test; those two do not.
+fn footer_hint(notice: Option<&str>, capturing: bool) -> (&str, Role) {
+    match (notice, capturing) {
+        (Some(notice), _) => (notice, Role::Warning),
+        (None, true) => ("esc cancel", Role::Dim),
+        (None, false) => ("↑↓ move · space rebind · backspace unbind · esc close", Role::Dim),
+    }
+}
+
 pub fn render(
     view: ShortcutView<'_>,
     atlas: &mut Atlas,
@@ -137,11 +152,7 @@ pub fn render(
 
     // --- the footer ---------------------------------------------------------
     let footer_y = y + visible as f32 * row_height + padding / 4.0;
-    let (hint, role) = match (view.notice, view.capturing) {
-        (Some(notice), _) => (notice, Role::Warning),
-        (None, true) => ("⎋ cancel", Role::Dim),
-        (None, false) => ("↑↓ move · space rebind · ⌫ unbind · ⎋ close", Role::Dim),
-    };
+    let (hint, role) = footer_hint(view.notice, view.capturing);
     layout_text(
         atlas,
         hint,
@@ -292,5 +303,22 @@ mod tests {
             &mut out,
         );
         assert!(!out.quads.is_empty());
+    }
+
+    #[test]
+    fn the_footer_names_its_keys_in_words_rather_than_drawing_them() {
+        // Reported from a screenshot: `⌫ unbind · ⎋ close` read as a circled
+        // cross and a circular arrow, and neither said what to press.
+        let (hint, _) = footer_hint(None, false);
+        for word in ["move", "rebind", "unbind", "close"] {
+            assert!(hint.contains(word), "`{word}` is missing from `{hint}`");
+        }
+        for drawn in ['\u{232b}', '\u{238b}'] {
+            assert!(!hint.contains(drawn), "`{drawn}` is back in `{hint}`");
+        }
+        assert!(footer_hint(None, true).0.starts_with("esc"), "the capture hint still draws its key");
+
+        // A notice still wins the footer, and is not a hint.
+        assert_eq!(footer_hint(Some("taken"), false).0, "taken");
     }
 }

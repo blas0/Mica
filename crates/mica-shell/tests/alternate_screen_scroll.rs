@@ -93,10 +93,18 @@ fn the_normal_screen_still_moves_the_viewport() {
             || screen(s).contains('$')),
         "the shell never printed a prompt"
     );
+    // Wait on the scrollback growing, not on the text. `contains("200")` was
+    // satisfied by the shell echoing the command back, so the test could reach
+    // the scroll before a single line had scrolled off — and it did, roughly
+    // one run in five. An absolute row count would not do either: a fresh
+    // session already reports one screen's worth of history.
+    let baseline = s.session().history_len();
     s.write_input(b"seq 1 200\n");
     assert!(
-        pump_until(&mut s, Duration::from_secs(5), |s| screen(s).contains("200")),
-        "seq never finished"
+        pump_until(&mut s, Duration::from_secs(5), |s| s.session().history_len()
+            >= baseline + 100),
+        "seq never filled the scrollback; the screen was:\n{}",
+        screen(&mut s)
     );
     assert!(!s.session().modes().alt_screen);
 
