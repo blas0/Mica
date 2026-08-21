@@ -15,9 +15,9 @@ Terminal emulator focused on smooth motion and lightweight rendering.
 > [!NOTE]
 > **Projected release**: 2026 August
 
-### Primary Features
+### Features
+> `alpha 0.1`
 
-> `alpha-0.1`
 1. Smooth kareting
 2. Smooth cursor blink
 3. Config is a file, keyboard shortcuts are a TUI
