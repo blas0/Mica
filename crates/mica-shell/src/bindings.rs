@@ -257,17 +257,22 @@ pub const BINDABLE: &[Bindable] = &[
     Bindable { id: "settings.fx.blink", label: "Toggle Caret Blink", implemented: true },
     Bindable { id: "settings.fx.reduce", label: "Toggle Reduce Motion", implemented: true },
     Bindable { id: "settings.fx.ambient", label: "Toggle Ambient Light", implemented: true },
-    // Mica has one surface per window and no splitter. These are here because
+    Bindable { id: "pane.split_right", label: "New Pane · Right", implemented: true },
+    Bindable { id: "pane.split_left", label: "New Pane · Left", implemented: true },
+    Bindable { id: "pane.split_down", label: "New Pane · Down", implemented: true },
+    Bindable { id: "pane.split_up", label: "New Pane · Up", implemented: true },
+    Bindable { id: "pane.focus_right", label: "Focus Pane · Right", implemented: true },
+    Bindable { id: "pane.focus_left", label: "Focus Pane · Left", implemented: true },
+    Bindable { id: "pane.focus_down", label: "Focus Pane · Down", implemented: true },
+    Bindable { id: "pane.focus_up", label: "Focus Pane · Up", implemented: true },
+    Bindable { id: "pane.close", label: "Close Pane", implemented: true },
+    // Mica has one window per surface and no tab bar. These are here because
     // the bindings and the settings catalogue are the contract, and shipping
     // the contract before the feature is how the feature arrives without
     // breaking anyone's configuration.
     Bindable { id: "session.new_tab", label: "New Tab", implemented: false },
     Bindable { id: "session.next_tab", label: "Next Tab", implemented: false },
     Bindable { id: "session.previous_tab", label: "Previous Tab", implemented: false },
-    Bindable { id: "pane.split_right", label: "New Pane · Right", implemented: false },
-    Bindable { id: "pane.split_left", label: "New Pane · Left", implemented: false },
-    Bindable { id: "pane.split_down", label: "New Pane · Down", implemented: false },
-    Bindable { id: "pane.split_up", label: "New Pane · Up", implemented: false },
 ];
 
 /// The chord → action table.
@@ -317,11 +322,20 @@ impl Bindings {
         bind(cmd, Key::Char('t'), "session.new_tab");
         bind(ctrl, Key::Tab, "session.next_tab");
         bind(ctrl_shift, Key::Tab, "session.previous_tab");
+        // `⌥⌘` arrows split, `⌥⌘⇧` arrows move between the panes. One
+        // modifier apart, because they are the same gesture with and without
+        // a new shell at the end of it.
         bind(cmd_opt, Key::Right, "pane.split_right");
         bind(cmd_opt, Key::Left, "pane.split_left");
         bind(cmd_opt, Key::Down, "pane.split_down");
         bind(cmd_opt, Key::Up, "pane.split_up");
-        let _ = cmd_opt_shift;
+        bind(cmd_opt_shift, Key::Right, "pane.focus_right");
+        bind(cmd_opt_shift, Key::Left, "pane.focus_left");
+        bind(cmd_opt_shift, Key::Down, "pane.focus_down");
+        bind(cmd_opt_shift, Key::Up, "pane.focus_up");
+        // `⌘W` is the window on a Mac. A pane closes the way a shell does —
+        // `exit`, or `^D` — and by this, which is deliberately not `⌘W`.
+        bind(cmd_shift, Key::Char('w'), "pane.close");
         // `⌘]` and `⌘[` rather than the arrows: `⌘↓` is scroll-to-bottom, and
         // the palette used to claim both for both.
         bind(cmd, Key::Char(']'), "blocks.next");

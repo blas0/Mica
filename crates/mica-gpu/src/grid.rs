@@ -94,6 +94,13 @@ pub struct GutterInstance {
     pub color: Rgba,
     pub width: f32,
     pub radius: f32,
+    /// The column the gutter hangs to the left of. Zero for a window with one
+    /// pane; a split pane's mark belongs at *its* left edge, not the window's.
+    ///
+    /// Last, with explicit padding, because MSL aligns `uchar4` to 4 and would
+    /// otherwise put `color` somewhere Rust does not.
+    pub column: u16,
+    pub _pad: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -218,12 +225,13 @@ const _: () = {
     assert!(offset_of!(RuleInstance, thickness) == 10);
     assert!(offset_of!(RuleInstance, color) == 12);
 
-    assert!(size_of::<GutterInstance>() == 16);
+    assert!(size_of::<GutterInstance>() == 20);
     assert!(offset_of!(GutterInstance, row) == 0);
     assert!(offset_of!(GutterInstance, rows) == 2);
     assert!(offset_of!(GutterInstance, color) == 4);
     assert!(offset_of!(GutterInstance, width) == 8);
     assert!(offset_of!(GutterInstance, radius) == 12);
+    assert!(offset_of!(GutterInstance, column) == 16);
 
     assert!(size_of::<ShapeInstance>() == 32);
     assert!(offset_of!(ShapeInstance, origin) == 0);
@@ -393,11 +401,18 @@ pub struct RowBuilder<'a> {
     pub metrics: CellMetrics,
     /// Alpha applied to the whole grid, used by the theme cross-fade.
     pub alpha: f32,
+    /// Where this grid's cell (0, 0) sits in the window's cell grid.
+    ///
+    /// Panes are rectangles of one shared grid, which is what lets every pane
+    /// in a window be drawn by a single pass: the instances only differ by
+    /// this offset. A single-pane window leaves it at `(0, 0)`.
+    pub origin: (u16, u16),
 }
 
 impl RowBuilder<'_> {
     pub fn build_row(&self, row: RowRef<'_>, atlas: &mut Atlas, out: &mut InstanceBuffers) {
         let default_bg = self.material.role(Role::Background);
+        let line = row.index + self.origin.1;
 
         for (column, cell) in row.cells.iter().enumerate() {
             // The trailing half of a wide character carries no glyph of its
@@ -405,7 +420,7 @@ impl RowBuilder<'_> {
             if cell.flags.contains(CellFlags::WIDE_SPACER) {
                 continue;
             }
-            let column = column as u16;
+            let column = column as u16 + self.origin.0;
             let (fg, bg) = resolve_colors(cell, self.material);
             let columns = cell.width.max(1).min(2);
 
@@ -414,14 +429,14 @@ impl RowBuilder<'_> {
             // drops essentially every background quad in the frame.
             if bg != default_bg {
                 out.backgrounds.push(BgInstance {
-                    cell: [column, row.index],
+                    cell: [column, line],
                     width: columns as u16,
                     _pad: 0,
                     color: Rgba::with_alpha(bg, self.alpha),
                 });
             }
 
-            self.push_rules(cell, column, row.index, fg, out);
+            self.push_rules(cell, column, line, fg, out);
 
             if cell.content.is_empty() || cell.flags.contains(CellFlags::HIDDEN) {
                 continue;
@@ -441,7 +456,7 @@ impl RowBuilder<'_> {
             };
             let Some(entry) = entry.filter(|e| !e.is_blank()) else { continue };
 
-            out.glyphs.push(glyph_instance(entry, column, row.index, fg, self.alpha));
+            out.glyphs.push(glyph_instance(entry, column, line, fg, self.alpha));
         }
     }
 
@@ -637,6 +652,7 @@ pub fn block_gutters(
     visible_rows: u16,
     material: &Material,
     metrics: CellMetrics,
+    origin: (u16, u16),
     out: &mut Vec<GutterInstance>,
 ) {
     let width = (metrics.width as f32 / 4.0).max(2.0);
@@ -663,11 +679,13 @@ pub fn block_gutters(
         };
 
         out.push(GutterInstance {
-            row: top,
+            row: top + origin.1,
             rows,
             color: Rgba::with_alpha(material.role(role), alpha),
             width,
             radius: width / 2.0,
+            column: origin.0,
+            _pad: 0,
         });
     }
 }
@@ -704,7 +722,8 @@ mod tests {
         let material = material();
         let mut atlas = atlas();
         let metrics = atlas.metrics();
-        let builder = RowBuilder { material: &material, tables, metrics, alpha: 1.0 };
+        let builder =
+            RowBuilder { material: &material, tables, metrics, alpha: 1.0, origin: (0, 0) };
         let mut out = InstanceBuffers::default();
         builder.build_row(RowRef { index: 0, cells, wrapped: false }, &mut atlas, &mut out);
         (out, atlas)
@@ -1111,7 +1130,7 @@ mod tests {
             folded: false,
         };
         let mut out = Vec::new();
-        block_gutters(&[block], 0, 24, &m, metrics, &mut out);
+        block_gutters(&[block], 0, 24, &m, metrics, (0, 0), &mut out);
 
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].row, 5);
@@ -1137,7 +1156,7 @@ mod tests {
         };
         let mut out = Vec::new();
         // Entirely above the viewport, and entirely below it.
-        block_gutters(&[block(0, 5), block(100, 105)], 10, 24, &m, metrics, &mut out);
+        block_gutters(&[block(0, 5), block(100, 105)], 10, 24, &m, metrics, (0, 0), &mut out);
         assert!(out.is_empty(), "off-screen blocks produced {} marks", out.len());
     }
 
@@ -1158,7 +1177,7 @@ mod tests {
             folded: false,
         };
         let mut out = Vec::new();
-        block_gutters(&[block], 10, 24, &m, metrics, &mut out);
+        block_gutters(&[block], 10, 24, &m, metrics, (0, 0), &mut out);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].row, 0, "the mark should start at the top of the viewport");
         assert_eq!(out[0].rows, 10);
@@ -1176,7 +1195,8 @@ mod tests {
         cells[0].bg = Color::palette(2);
         cells[0].flags.insert(CellFlags::UNDERLINE_SINGLE);
 
-        let builder = RowBuilder { material: &material, tables: &tables, metrics, alpha: 0.5 };
+        let builder =
+            RowBuilder { material: &material, tables: &tables, metrics, alpha: 0.5, origin: (0, 0) };
         let mut out = InstanceBuffers::default();
         builder.build_row(
             RowRef { index: 0, cells: &cells, wrapped: false },

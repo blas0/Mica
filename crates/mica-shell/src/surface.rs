@@ -18,7 +18,7 @@ use mica_core::session::{Session, SessionEvent};
 use mica_core::settings::Settings;
 use mica_gpu::frame::Reason;
 use mica_gpu::grid::{
-    block_gutters, caret_decay, cursor_shape, RowBuilder, SubstrateUniforms, Uniforms,
+    block_gutters, caret_decay, cursor_shape, Rgba, RowBuilder, SubstrateUniforms, Uniforms,
 };
 use mica_gpu::overlay::find::Find;
 use mica_gpu::overlay::palette::{actions_with_themes, Action, Palette};
@@ -27,13 +27,52 @@ use mica_gpu::overlay::OverlayMetrics;
 use mica_gpu::renderer::Renderer;
 
 use crate::bindings::{Bindings, Chord};
+use crate::pane::{CellRect, Direction, Layout, PaneId, DIVIDER};
 use crate::integration::{self, Integration, Shell};
 use crate::keys::{Key, Modifiers};
 use crate::shortcut_panel::{Handled, ShortcutPanel};
 use crate::terminfo;
 
-pub struct Surface {
+/// One shell, and everything that belongs to it alone.
+///
+/// A caret per pane, not per window: two panes both have a cursor, both are
+/// animating it, and only one of them is focused. Sharing one would make the
+/// unfocused pane's cursor chase the focused pane's.
+struct Pane {
+    id: PaneId,
     session: Session,
+    caret: Caret,
+    /// Where the layout last put it, in cells. Cached so a frame does not
+    /// re-walk the tree per pane, and so a resize can tell whether the pane's
+    /// grid actually changed.
+    rect: CellRect,
+    title: String,
+}
+
+/// A pane arriving.
+struct SplitMotion {
+    pane: PaneId,
+    fade: Crossfade,
+}
+
+pub struct Surface {
+    /// Every open shell in this window, in no particular order — [`Layout`]
+    /// decides where they are, and it addresses them by [`PaneId`].
+    panes: Vec<Pane>,
+    layout: Layout,
+    focus: PaneId,
+    /// Ids are never reused. A pane that closes takes its id with it, so a
+    /// stale reference resolves to nothing rather than to a different shell.
+    next_pane: u32,
+    /// The environment every pane's shell inherits: terminfo, `TERM_PROGRAM`,
+    /// and the shell integration. Built once at open, because a new pane must
+    /// come up in the same world as the first one.
+    spawn_env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+    /// How a pane tells the window layer it has output. Kept because a pane
+    /// opened later has to be woken the same way as the first one — a split
+    /// whose shell only redraws when you touch the trackpad is the bug this
+    /// field exists to prevent.
+    wakeup: Option<mica_core::pty::Wakeup>,
     atlas: Atlas,
     renderer: Renderer,
     /// The theme being switched *to*. What is actually drawn is
@@ -45,8 +84,15 @@ pub struct Surface {
     /// What the renderer reads. Recomputed only while fading.
     display_material: Material,
     crossfade: Crossfade,
-    /// Sub-cell caret position, velocity, wake, and blink phase.
-    caret: Caret,
+    /// A pane that has just opened, and how far through arriving it is.
+    ///
+    /// The rectangle itself does not animate — that would mean resizing a PTY
+    /// every frame, and a shell being told its size sixty times in a fifth of
+    /// a second is a shell that spends the whole split redrawing. What
+    /// animates is the *arrival*: the new pane fades up and its divider draws
+    /// itself out from the split. Bounded, so the animation count returns to
+    /// zero and the terminal goes silent again.
+    split_motion: Option<SplitMotion>,
     motion: MotionSettings,
     /// Whether an animation is currently registered with the frame scheduler.
     ///
@@ -83,8 +129,9 @@ impl std::fmt::Debug for Surface {
         f.debug_struct("Surface")
             .field("viewport", &self.viewport)
             .field("scale", &self.scale)
-            .field("grid", &self.session.dimensions())
-            .field("blocks", &self.session.blocks().len())
+            .field("grid", &self.sess().dimensions())
+            .field("panes", &self.panes.len())
+            .field("blocks", &self.sess().blocks().len())
             .finish_non_exhaustive()
     }
 }
@@ -170,19 +217,32 @@ impl Surface {
         )
         .map_err(SurfaceError::Theme)?;
 
-        let session = Session::spawn_with_wakeup(&settings, config, wakeup)?;
+        let spawn_env = config.env.clone();
+        let session = Session::spawn_with_wakeup(&settings, config, wakeup.clone())?;
 
         let motion = settings.motion.sanitised();
         let bindings = Bindings::from_overrides(&settings.keys);
+        let root = PaneId(0);
         let mut surface = Surface {
-            session,
+            panes: vec![Pane {
+                id: root,
+                session,
+                caret: Caret::new(0.0, 0.0),
+                rect: CellRect::new(0, 0, cols, rows),
+                title: String::from("Mica"),
+            }],
+            layout: Layout::new(root),
+            focus: root,
+            next_pane: 1,
+            spawn_env,
+            wakeup,
             atlas,
             renderer,
             display_material: material.clone(),
             previous_material: None,
             material,
             crossfade: Crossfade::done(),
-            caret: Caret::new(0.0, 0.0),
+            split_motion: None,
             motion,
             animating: false,
             settings,
@@ -202,6 +262,44 @@ impl Surface {
         // shortcut reads as unbound until the user opens the panel.
         surface.refresh_palette_accelerators();
         Ok(surface)
+    }
+
+    /// The focused pane. Every unqualified "the session" in this file means
+    /// this one: input goes here, the caret drawn brightest is this one's, and
+    /// a split divides this one.
+    fn pane(&self) -> &Pane {
+        self.panes
+            .iter()
+            .find(|p| p.id == self.focus)
+            .unwrap_or_else(|| &self.panes[0])
+    }
+
+    fn pane_mut(&mut self) -> &mut Pane {
+        let index = self.panes.iter().position(|p| p.id == self.focus).unwrap_or(0);
+        &mut self.panes[index]
+    }
+
+    fn sess(&self) -> &Session {
+        &self.pane().session
+    }
+
+    fn sess_mut(&mut self) -> &mut Session {
+        &mut self.pane_mut().session
+    }
+
+    /// A pane's session by position, for tests that have to watch more than
+    /// the focused one.
+    ///
+    /// Ordered by when the pane opened, which is not the order they appear on
+    /// screen — [`Layout`] owns that, and a test that wants a rectangle should
+    /// ask for one.
+    pub fn pane_session(&mut self, index: usize) -> &mut Session {
+        &mut self.panes[index].session
+    }
+
+    /// How many panes are open. One is the ordinary case.
+    pub fn pane_count(&self) -> usize {
+        self.panes.len()
     }
 
     /// Redirects where settings are written. Tests only — the app uses
@@ -356,7 +454,7 @@ impl Surface {
     fn overlay_changed(&mut self) {
         // An overlay is drawn over the grid, so the rows beneath it have to be
         // repainted when it appears or disappears.
-        self.session.damage_all();
+        self.sess_mut().damage_all();
         self.renderer.scheduler().request(Reason::Overlay);
     }
 
@@ -369,11 +467,11 @@ impl Surface {
         if !self.find.is_open() {
             return;
         }
-        let (top, bottom) = self.session.line_bounds();
+        let (top, bottom) = self.sess_mut().line_bounds();
         let lines: Vec<(i32, String)> = (top..=bottom)
-            .filter_map(|line| self.session.line_text(line).map(|text| (line, text)))
+            .filter_map(|line| self.sess_mut().line_text(line).map(|text| (line, text)))
             .collect();
-        let focus = self.session.cursor().line as i32;
+        let focus = self.sess_mut().cursor().line as i32;
         self.find.run(lines.iter().map(|(l, t)| (*l, t.as_str())), focus);
     }
 
@@ -437,12 +535,12 @@ impl Surface {
 
     /// Brings an absolute line into view.
     fn scroll_to_line(&mut self, line: i32) {
-        let (_, rows) = self.session.dimensions();
+        let (_, rows) = self.sess_mut().dimensions();
         // Centre it rather than putting it at an edge: a match at the very top
         // of the window has no context above it.
         let delta = -(line - rows as i32 / 2);
         if delta != 0 {
-            self.session.scroll(delta);
+            self.sess_mut().scroll(delta);
         }
     }
 
@@ -467,21 +565,21 @@ impl Surface {
         }
         match id {
             "session.scroll_bottom" => {
-                self.session.scroll_to_bottom();
+                self.sess_mut().scroll_to_bottom();
                 self.renderer.scheduler().request(Reason::Damage);
                 true
             }
             "session.clear_selection" => {
-                self.session.set_selection(None);
+                self.sess_mut().set_selection(None);
                 self.renderer.scheduler().request(Reason::Selection);
                 true
             }
             "blocks.next" | "blocks.previous" => {
-                let row = self.session.cursor().line as u64;
+                let row = self.sess_mut().cursor().line as u64;
                 let target = if id.ends_with("next") {
-                    self.session.block_tracker_mut().next_block_after(row).map(|b| b.start_row)
+                    self.sess_mut().block_tracker_mut().next_block_after(row).map(|b| b.start_row)
                 } else {
-                    self.session
+                    self.sess_mut()
                         .block_tracker_mut()
                         .previous_block_before(row)
                         .map(|b| b.start_row)
@@ -510,7 +608,7 @@ impl Surface {
             "session.scroll_top" => {
                 // `history_len` is the whole buffer; scrolling by it saturates
                 // at the oldest line rather than needing to be exact.
-                let top = self.session.history_len() as i32;
+                let top = self.sess_mut().history_len() as i32;
                 self.scroll(top);
                 true
             }
@@ -518,7 +616,7 @@ impl Surface {
                 self.settings.ambient.enabled = !self.settings.ambient.enabled;
                 self.persist();
                 self.renderer.scheduler().request(Reason::Damage);
-                self.session.damage_all();
+                self.sess_mut().damage_all();
                 true
             }
             "settings.fx.cursor" => {
@@ -544,6 +642,18 @@ impl Surface {
             "settings.fx.reduce" => {
                 self.set_motion(MotionSettings { reduce: !self.motion.reduce, ..self.motion });
                 true
+            }
+            "pane.split_right" => self.split(Direction::Right),
+            "pane.split_left" => self.split(Direction::Left),
+            "pane.split_down" => self.split(Direction::Down),
+            "pane.split_up" => self.split(Direction::Up),
+            "pane.focus_right" => self.focus_direction(Direction::Right),
+            "pane.focus_left" => self.focus_direction(Direction::Left),
+            "pane.focus_down" => self.focus_direction(Direction::Down),
+            "pane.focus_up" => self.focus_direction(Direction::Up),
+            "pane.close" => {
+                let focus = self.focus;
+                self.close_pane(focus)
             }
             // Recognised but not implemented in v0.1. Returning false is the
             // honest answer — it lets the caller say so rather than silently
@@ -571,11 +681,11 @@ impl Surface {
     }
 
     pub fn selection_text(&self) -> Option<String> {
-        self.session.selection_text()
+        self.sess().selection_text()
     }
 
     pub fn session(&mut self) -> &mut Session {
-        &mut self.session
+        self.sess_mut()
     }
 
     pub fn settings(&self) -> &Settings {
@@ -587,7 +697,7 @@ impl Surface {
     }
 
     pub fn has_exited(&self) -> bool {
-        self.session.has_exited()
+        self.panes.iter().all(|p| p.session.has_exited())
     }
 
     pub fn set_focused(&mut self, focused: bool) {
@@ -600,20 +710,64 @@ impl Surface {
     /// Reads whatever the PTY produced and schedules a frame if anything
     /// changed. Returns the events the window layer has to act on.
     pub fn pump(&mut self) -> Vec<SessionEvent> {
-        if self.session.pump() && self.session.has_damage() {
-            self.renderer.scheduler().request(Reason::Damage);
-        }
-        let events = self.session.drain_events();
-        for event in &events {
-            if let SessionEvent::TitleChanged(title) = event {
-                self.title = if title.is_empty() { "Mica".into() } else { title.clone() };
+        // Every pane, not just the focused one. A background pane still has a
+        // shell in it, and a build running in a pane you are not looking at
+        // has to keep printing.
+        let mut damaged = false;
+        let focus = self.focus;
+        let mut events = Vec::new();
+        let mut focus_title = None;
+        for pane in &mut self.panes {
+            if pane.session.pump() && pane.session.has_damage() {
+                damaged = true;
+            }
+            for event in pane.session.drain_events() {
+                if let SessionEvent::TitleChanged(title) = &event {
+                    pane.title = if title.is_empty() { "Mica".into() } else { title.clone() };
+                    if pane.id == focus {
+                        focus_title = Some(pane.title.clone());
+                    }
+                }
+                // Only the focused pane's events reach the window layer. A
+                // background pane ringing the bell or renaming itself is not
+                // the window's business, and letting those through would let
+                // an unfocused shell retitle the window.
+                if pane.id == focus {
+                    events.push(event);
+                }
             }
         }
+        if let Some(title) = focus_title {
+            self.title = title;
+        }
+        if damaged {
+            self.renderer.scheduler().request(Reason::Damage);
+        }
+        self.close_exited_panes();
         events
     }
 
+    /// Reaps panes whose shell has exited.
+    ///
+    /// A pane whose shell is gone is a rectangle of dead text. The last one is
+    /// left alone: that is the window closing, and [`Surface::has_exited`] is
+    /// what says so.
+    fn close_exited_panes(&mut self) {
+        if self.panes.len() < 2 {
+            return;
+        }
+        let gone: Vec<PaneId> =
+            self.panes.iter().filter(|p| p.session.has_exited()).map(|p| p.id).collect();
+        for id in gone {
+            if self.panes.len() < 2 {
+                break;
+            }
+            self.close_pane(id);
+        }
+    }
+
     pub fn write_input(&mut self, bytes: &[u8]) {
-        let _ = self.session.write_input(bytes);
+        let _ = self.sess_mut().write_input(bytes);
     }
 
     /// One scroll gesture, already converted to whole lines.
@@ -624,18 +778,17 @@ impl Surface {
     /// is the whole reason scrolling inside a full-screen CLI used to do
     /// nothing at all.
     pub fn scroll(&mut self, delta: i32) {
-        match crate::scroll::route(delta, self.session.modes()) {
-            crate::scroll::ScrollTarget::Viewport(lines) => {
-                self.session.scroll(lines);
-                if self.session.has_damage() {
-                    self.renderer.scheduler().request(Reason::Damage);
-                }
-            }
-            crate::scroll::ScrollTarget::Keys(bytes) => {
-                self.write_input(&bytes);
-            }
-            crate::scroll::ScrollTarget::Nothing => {}
-        }
+        let focus = self.focus;
+        self.scroll_pane(focus, delta);
+    }
+
+    /// A scroll gesture with a pointer behind it.
+    ///
+    /// Falls back to the focused pane when the pointer is over a divider or
+    /// off the grid, so a gesture is never simply dropped.
+    pub fn scroll_at(&mut self, delta: i32, x: f32, y: f32) {
+        let id = self.pane_at(x, y).unwrap_or(self.focus);
+        self.scroll_pane(id, delta);
     }
 
     /// Resizes to a new drawable size, reflowing the grid.
@@ -657,10 +810,13 @@ impl Surface {
             ));
         }
 
-        let metrics = self.atlas.metrics();
-        let (cols, rows) = grid_size(viewport, metrics.width, metrics.height);
-        let _ = self.session.resize(cols, rows);
-        self.session.damage_all();
+        // Every pane's share of the window changed, so every pane's shell has
+        // to be told. `relayout` skips the ones whose rectangle came out the
+        // same, which for a single-pane window is never.
+        self.relayout();
+        for pane in &mut self.panes {
+            pane.session.damage_all();
+        }
         self.renderer.scheduler().request(Reason::Resize);
     }
 
@@ -669,6 +825,14 @@ impl Surface {
     /// Long enough to read as a transition rather than a flicker, short enough
     /// that switching themes in the palette still feels like a switch.
     const THEME_FADE: Duration = Duration::from_millis(220);
+
+    /// How long a new pane takes to arrive.
+    ///
+    /// Shorter than a theme change: a split is a thing you did on purpose and
+    /// want to start typing into, so the motion has to be over before your
+    /// hands are. Reduce Motion collapses it — `Crossfade::start` handles
+    /// that, the same way it does for the theme.
+    const SPLIT_FADE: Duration = Duration::from_millis(160);
 
     /// Swaps the theme, cross-fading rather than cutting.
     ///
@@ -690,7 +854,7 @@ impl Surface {
         // gets the answer the user just chose rather than the one that is
         // still fading out.
         self.refresh_display_material();
-        self.session.damage_all();
+        self.sess_mut().damage_all();
         self.renderer.scheduler().request(Reason::Animation);
         self.sync_animation();
         true
@@ -756,7 +920,7 @@ impl Surface {
         }
         self.set_theme(&settings.theme);
         if ambient_changed {
-            self.session.damage_all();
+            self.sess_mut().damage_all();
             self.renderer.scheduler().request(Reason::Damage);
         }
         deferred
@@ -767,7 +931,7 @@ impl Surface {
         self.settings.motion = self.motion;
         if !self.motion.effective_style().interpolates() {
             let (column, line) = self.caret_target();
-            self.caret.teleport(column, line);
+            self.pane_mut().caret.teleport(column, line);
         }
         self.renderer.scheduler().request(Reason::Cursor);
         self.sync_animation();
@@ -775,7 +939,7 @@ impl Surface {
 
     /// Where the caret is trying to be, in fractional cell coordinates.
     fn caret_target(&self) -> (f32, f32) {
-        let cursor = self.session.cursor();
+        let cursor = self.sess().cursor();
         (cursor.column as f32, cursor.line as f32)
     }
 
@@ -788,13 +952,35 @@ impl Surface {
     /// the screen — see `MAX_STEP` in `mica-core::motion`.
     pub fn advance(&mut self, dt: Duration) {
         let (column, line) = self.caret_target();
-        if [column, line] != self.caret.target() {
-            self.caret.retarget(column, line, &self.motion);
+        if [column, line] != self.pane_mut().caret.target() {
+            let motion = self.motion;
+            self.pane_mut().caret.retarget(column, line, &motion);
             self.renderer.scheduler().request(Reason::Cursor);
         }
 
-        if self.caret.advance(dt, &self.motion) {
+        let motion = self.motion;
+        if self.pane_mut().caret.advance(dt, &motion) {
             self.renderer.scheduler().request(Reason::Cursor);
+        }
+
+        if let Some(split) = &mut self.split_motion {
+            if split.fade.advance(dt) {
+                // Only the arriving pane is changing, so only it is damaged.
+                let id = split.pane;
+                if let Some(pane) = self.panes.iter_mut().find(|p| p.id == id) {
+                    pane.session.damage_all();
+                }
+                self.renderer.scheduler().request(Reason::Animation);
+            } else {
+                self.split_motion = None;
+                // One last frame at full opacity, or the pane finishes a
+                // fraction short of solid and stays there until something
+                // else damages it.
+                for pane in &mut self.panes {
+                    pane.session.damage_all();
+                }
+                self.renderer.scheduler().request(Reason::Animation);
+            }
         }
 
         if self.crossfade.is_running() {
@@ -802,7 +988,7 @@ impl Surface {
             // Every cell's colour is changing, so every cell is damaged. This
             // is the one animation in Mica that is genuinely full-screen, and
             // it is why it is measured in a couple of hundred milliseconds.
-            self.session.damage_all();
+            self.sess_mut().damage_all();
             self.renderer.scheduler().request(Reason::Animation);
         }
         self.refresh_display_material();
@@ -831,7 +1017,10 @@ impl Surface {
     /// once when everything stops, because the count reaching zero is what
     /// makes an idle terminal go silent.
     fn sync_animation(&mut self) {
-        let running = self.caret.is_animating(&self.motion) || self.crossfade.is_running();
+        let motion = self.motion;
+        let running = self.panes.iter().any(|p| p.caret.is_animating(&motion))
+            || self.crossfade.is_running()
+            || self.split_motion.is_some();
         if running == self.animating {
             return;
         }
@@ -849,6 +1038,223 @@ impl Surface {
 
     pub fn stats(&self) -> mica_gpu::frame::FrameStats {
         self.renderer.stats()
+    }
+
+    /// Opens a shell for a new pane, in the same world as the first one.
+    ///
+    /// Same environment, same terminfo, same shell integration — a pane that
+    /// came up without those would be a subtly different terminal sitting next
+    /// to the real one.
+    fn spawn_session(
+        &self,
+        cols: u16,
+        rows: u16,
+        cwd: Option<PathBuf>,
+    ) -> Result<Session, SurfaceError> {
+        let mut config = PtyConfig::for_shell_settings(cols, rows, &self.settings.shell);
+        config.cols = cols;
+        config.rows = rows;
+        config.env = self.spawn_env.clone();
+        if let Some(dir) = cwd {
+            if dir.is_dir() {
+                config.cwd = Some(dir);
+            }
+        }
+        Ok(Session::spawn_with_wakeup(&self.settings, config, self.wakeup.clone())?)
+    }
+
+    /// Splits the focused pane, putting the new one on the given side.
+    ///
+    /// Returns false when the split was refused — the pane is already as small
+    /// as a pane gets, or the shell would not start. Nothing is half-applied
+    /// in either case: the layout is only replaced once the shell is running.
+    pub fn split(&mut self, direction: Direction) -> bool {
+        let area = self.area();
+        let id = PaneId(self.next_pane);
+
+        // Try the split on a copy first. A layout that refuses is a layout
+        // that has not changed, and it must not cost a spawned shell to find
+        // that out.
+        let mut layout = self.layout.clone();
+        if !layout.split(area, self.focus, direction, id) {
+            return false;
+        }
+        let Some(rect) = layout.rect_of(area, id) else { return false };
+
+        let cwd = match self.settings.shell.new_pane_origin {
+            mica_core::settings::PaneOrigin::Inherit => {
+                self.sess().cwd().map(PathBuf::from)
+            }
+            mica_core::settings::PaneOrigin::StartingDir => None,
+        };
+        let session = match self.spawn_session(rect.cols, rect.rows, cwd) {
+            Ok(session) => session,
+            Err(error) => {
+                eprintln!("mica: could not open a pane: {error}");
+                return false;
+            }
+        };
+
+        self.next_pane += 1;
+        self.layout = layout;
+        self.panes.push(Pane {
+            id,
+            session,
+            caret: Caret::new(0.0, 0.0),
+            rect,
+            title: String::from("Mica"),
+        });
+        if self.settings.shell.focus_new_panes {
+            self.set_focus(id);
+        }
+        self.relayout();
+        self.split_motion =
+            Some(SplitMotion { pane: id, fade: Crossfade::start(Surface::SPLIT_FADE, &self.motion) });
+        self.renderer.scheduler().request(Reason::Animation);
+        self.sync_animation();
+        true
+    }
+
+    /// Closes a pane and gives its space back to its sibling.
+    ///
+    /// Returns false when that was the last pane, which is the window layer's
+    /// signal to close the window rather than leave an empty one.
+    pub fn close_pane(&mut self, id: PaneId) -> bool {
+        let area = self.area();
+        let Some(next) = self.layout.close(area, id) else { return false };
+        self.panes.retain(|p| p.id != id);
+        if self.focus == id {
+            self.set_focus(next);
+        }
+        self.relayout();
+        true
+    }
+
+    /// Moves focus to the pane in that direction, if there is one.
+    pub fn focus_direction(&mut self, direction: Direction) -> bool {
+        let area = self.area();
+        let Some(next) = self.layout.neighbour(area, self.focus, direction) else {
+            return false;
+        };
+        self.set_focus(next);
+        true
+    }
+
+    fn set_focus(&mut self, id: PaneId) {
+        if self.focus == id || !self.panes.iter().any(|p| p.id == id) {
+            return;
+        }
+        self.focus = id;
+        // Both carets change: one lights up, one hollows out. And the divider
+        // beside the newly focused pane changes colour, which is a quad rather
+        // than a cell, so damage alone would not redraw it.
+        for pane in &mut self.panes {
+            pane.session.damage_all();
+        }
+        self.renderer.scheduler().request(Reason::Focus);
+    }
+
+    /// Recomputes every pane's rectangle and tells its shell the new size.
+    ///
+    /// A pane whose rectangle did not change is left alone — a `SIGWINCH` to a
+    /// shell that is the same size as it was is noise a full-screen program
+    /// will redraw itself over.
+    fn relayout(&mut self) {
+        let area = self.area();
+        for (id, rect) in self.layout.rects(area) {
+            let Some(pane) = self.panes.iter_mut().find(|p| p.id == id) else { continue };
+            if pane.rect == rect {
+                continue;
+            }
+            pane.rect = rect;
+            let _ = pane.session.resize(rect.cols, rect.rows);
+            pane.session.damage_all();
+        }
+        self.renderer.scheduler().request(Reason::Resize);
+    }
+
+    /// The whole grid the window has to give, in cells.
+    ///
+    /// One number for the window, not per pane: the layout divides it, and
+    /// every pane's rectangle is a slice of it. Panes exist inside one grid,
+    /// which is what lets them be drawn in a single pass.
+    fn area(&self) -> CellRect {
+        let metrics = self.atlas.metrics();
+        let (cols, rows) = grid_size(self.viewport, metrics.width, metrics.height);
+        CellRect::new(0, 0, cols, rows)
+    }
+
+    /// A hairline down the middle of every divider cell.
+    ///
+    /// A whole cell would be a wall; what a split needs is the thinnest mark
+    /// that still separates. The line is drawn in `Dim` and the one bordering
+    /// the focused pane in `Accent`, so where you are typing is visible
+    /// without a title bar or a highlight over the text.
+    fn build_dividers(&mut self, metrics: mica_atlas::fontset::CellMetrics) {
+        if self.panes.len() < 2 {
+            return;
+        }
+        let cell = (metrics.width as f32, metrics.height as f32);
+        let thickness = (cell.0 / 8.0).clamp(1.0, 3.0);
+        let dim = Rgba::with_alpha(self.display_material.role(Role::Dim), 0.55);
+        let area = self.area();
+        let focused = self.layout.rect_of(area, self.focus);
+
+        let arriving = self
+            .split_motion
+            .as_ref()
+            .and_then(|m| self.layout.rect_of(area, m.pane));
+
+        let mut quads = std::mem::take(&mut self.renderer.buffers().quads);
+        for divider in self.layout.dividers(area) {
+            let touches_new = arriving.is_some_and(|r| touches(divider, r));
+            let touches_focus = focused.is_some_and(|r| touches(divider, r));
+            let fill = if touches_focus && self.focused {
+                Rgba::with_alpha(self.display_material.role(Role::Accent), 0.7)
+            } else {
+                dim
+            };
+            // A divider next to an arriving pane draws itself out from the
+            // middle rather than appearing whole. `t` is eased, so the line
+            // arrives at the same moment the text in the pane does.
+            let extent = match (&self.split_motion, touches_new) {
+                (Some(motion), true) => motion.fade.t(),
+                _ => 1.0,
+            };
+            let (origin, size) = match divider.axis {
+                crate::pane::Axis::Columns => {
+                    let full = divider.len as f32 * cell.1;
+                    let drawn = full * extent;
+                    (
+                        [
+                            (divider.at as f32 + 0.5) * cell.0 - thickness / 2.0,
+                            divider.start as f32 * cell.1 + (full - drawn) / 2.0,
+                        ],
+                        [thickness, drawn],
+                    )
+                }
+                crate::pane::Axis::Rows => {
+                    let full = divider.len as f32 * cell.0;
+                    let drawn = full * extent;
+                    (
+                        [
+                            divider.start as f32 * cell.0 + (full - drawn) / 2.0,
+                            (divider.at as f32 + 0.5) * cell.1 - thickness / 2.0,
+                        ],
+                        [drawn, thickness],
+                    )
+                }
+            };
+            quads.push(mica_gpu::grid::QuadInstance {
+                origin,
+                size,
+                fill,
+                border: Rgba([0, 0, 0, 0]),
+                radius: 0.0,
+                border_width: 0.0,
+            });
+        }
+        self.renderer.buffers().quads = quads;
     }
 
     /// Builds one frame's instances from the damaged rows.
@@ -881,61 +1287,87 @@ impl Surface {
         // to reuse. Repainting everything keeps every glyph's use current, and
         // costs a hash lookup per cell on frames that were going to redraw
         // anyway.
-        if self.session.has_damage() {
+        if self.panes.iter().any(|p| p.session.has_damage()) {
             self.atlas.begin_frame();
-            self.session.damage_all();
             self.renderer.buffers().clear_rows();
+            for pane in &mut self.panes {
+                pane.session.damage_all();
+            }
 
-            let builder = RowBuilder {
-                material: &self.display_material,
-                tables: self.session.side_tables(),
-                metrics,
-                alpha: 1.0,
-            };
-            // The borrow checker is doing real work here: `dirty_rows` borrows
-            // the session while the atlas is borrowed mutably, so the rows are
-            // collected first.
-            let rows: Vec<_> = self.session.dirty_rows().collect();
+            // Every pane, one pass. Instances carry cell coordinates, so a
+            // pane is an offset rectangle of one shared grid — which is why a
+            // four-way split still costs the single draw call a lone terminal
+            // does.
+            let material = self.display_material.clone();
             let mut buffers = std::mem::take(self.renderer.buffers());
-            for row in rows {
-                builder.build_row(row, &mut self.atlas, &mut buffers);
+            let arriving = self.split_motion.as_ref().map(|m| (m.pane, m.fade.t()));
+            for pane in &self.panes {
+                let alpha = match arriving {
+                    Some((id, t)) if id == pane.id => t,
+                    _ => 1.0,
+                };
+                let builder = RowBuilder {
+                    material: &material,
+                    tables: pane.session.side_tables(),
+                    metrics,
+                    alpha,
+                    origin: (pane.rect.col, pane.rect.row),
+                };
+                // The borrow checker is doing real work here: `dirty_rows`
+                // borrows the session while the atlas is borrowed mutably, so
+                // the rows are collected first.
+                let rows: Vec<_> = pane.session.dirty_rows().collect();
+                for row in rows {
+                    builder.build_row(row, &mut self.atlas, &mut buffers);
+                }
             }
             *self.renderer.buffers() = buffers;
         }
 
-        // The caret and its wake. Both read the physics rather than the
-        // cursor's cell: while an animation is in flight those are different
-        // places, and that difference is the whole effect.
-        let cursor = self.session.cursor();
-        let presentation = self.caret.presentation(&self.motion);
-        {
-            let mut decays = std::mem::take(&mut self.renderer.buffers().decays);
-            caret_decay(
-                cursor,
-                self.caret.trail(),
-                metrics,
-                &self.display_material,
-                (0.0, 0.0),
-                &mut decays,
-            );
-            self.renderer.buffers().decays = decays;
-        }
-        if let Some(shape) = cursor_shape(
-            cursor,
-            presentation,
-            metrics,
-            &self.display_material,
-            (0.0, 0.0),
-            self.focused,
-        ) {
-            self.renderer.buffers().shapes.push(shape);
-        }
+        // The lines between the panes. Drawn from the layout rather than from
+        // the panes, because the divider cell belongs to neither of them.
+        self.build_dividers(metrics);
 
-        let (_, rows) = self.session.dimensions();
-        let blocks = self.session.blocks().to_vec();
+        // A caret per pane. The unfocused ones are drawn hollow by
+        // `cursor_shape`, which is how you can tell at a glance where typing
+        // will land.
+        let motion = self.motion;
+        let cell = (metrics.width as f32, metrics.height as f32);
+        let material = self.display_material.clone();
+        let focus = self.focus;
+        let window_focused = self.focused;
+        let mut decays = std::mem::take(&mut self.renderer.buffers().decays);
+        let mut shapes = std::mem::take(&mut self.renderer.buffers().shapes);
         let mut gutters = Vec::new();
-        block_gutters(&blocks, 0, rows, &self.display_material, metrics, &mut gutters);
+        for pane in &mut self.panes {
+            // The caret and its wake read the physics rather than the cursor's
+            // cell: while an animation is in flight those are different
+            // places, and that difference is the whole effect.
+            let cursor = pane.session.cursor();
+            let presentation = pane.caret.presentation(&motion);
+            let origin = (pane.rect.col as f32 * cell.0, pane.rect.row as f32 * cell.1);
+            let lit = window_focused && pane.id == focus;
+            caret_decay(cursor, pane.caret.trail(), metrics, &material, origin, &mut decays);
+            if let Some(shape) =
+                cursor_shape(cursor, presentation, metrics, &material, origin, lit)
+            {
+                shapes.push(shape);
+            }
+            let blocks = pane.session.blocks().to_vec();
+            block_gutters(
+                &blocks,
+                0,
+                pane.rect.rows,
+                &material,
+                metrics,
+                (pane.rect.col, pane.rect.row),
+                &mut gutters,
+            );
+        }
+        self.renderer.buffers().decays = decays;
+        self.renderer.buffers().shapes = shapes;
         self.renderer.buffers().gutters = gutters;
+        let (_, rows) = self.sess().dimensions();
 
         // Overlays last, so their quads land over the grid.
         if self.shortcuts.is_open() {
@@ -1031,7 +1463,7 @@ impl Surface {
         self.renderer.sync_atlas(&mut self.atlas)?;
         let (uniforms, substrate) = (self.uniforms(), self.substrate());
         self.renderer.render_to_drawable(drawable, target, uniforms, substrate)?;
-        self.session.clear_damage();
+        self.sess_mut().clear_damage();
         Ok(())
     }
 
@@ -1043,7 +1475,7 @@ impl Surface {
         self.renderer.sync_atlas(&mut self.atlas)?;
         let (uniforms, substrate) = (self.uniforms(), self.substrate());
         self.renderer.render_to_texture(target, uniforms, substrate)?;
-        self.session.clear_damage();
+        self.sess_mut().clear_damage();
         Ok(())
     }
 
@@ -1068,12 +1500,19 @@ impl Surface {
     /// not where the caret is drawn.
     /// How many trail samples the caret is currently carrying.
     pub fn caret_trail_len(&self) -> usize {
-        self.caret.trail().count()
+        self.pane().caret.trail().count()
+    }
+
+    /// How far a newly opened pane is through arriving, or `None` when
+    /// nothing is arriving.
+    #[cfg(test)]
+    pub(crate) fn split_progress(&self) -> Option<f32> {
+        self.split_motion.as_ref().map(|m| m.fade.t())
     }
 
     #[cfg(test)]
     pub(crate) fn has_damage_for_test(&self) -> bool {
-        self.session.has_damage()
+        self.panes.iter().any(|p| p.session.has_damage())
     }
 
     /// The cell height in **points**, not device pixels.
@@ -1086,21 +1525,78 @@ impl Surface {
         if self.scale > 0.0 { height / self.scale } else { height }
     }
 
+    /// The drawable size in points, which is what a mouse event is measured
+    /// in.
+    pub fn viewport_points(&self) -> (f32, f32) {
+        let scale = if self.scale > 0.0 { self.scale } else { 1.0 };
+        (self.viewport.0 as f32 / scale, self.viewport.1 as f32 / scale)
+    }
+
+    pub fn cell_width_points(&self) -> f32 {
+        let width = self.atlas.metrics().width as f32;
+        if self.scale > 0.0 { width / self.scale } else { width }
+    }
+
+    /// Which pane is under a point, in view points from the top-left.
+    ///
+    /// `None` for the divider between two panes — a click on the line belongs
+    /// to neither, and moving focus because the user grabbed a divider would
+    /// be the wrong answer to the wrong question.
+    pub fn pane_at(&self, x: f32, y: f32) -> Option<PaneId> {
+        let (w, h) = (self.cell_width_points(), self.cell_height_points());
+        if w <= 0.0 || h <= 0.0 || x < 0.0 || y < 0.0 {
+            return None;
+        }
+        self.layout.at(self.area(), (x / w) as u16, (y / h) as u16)
+    }
+
+    /// Focuses whatever pane is under the pointer. Returns whether focus moved.
+    pub fn focus_pane_at(&mut self, x: f32, y: f32) -> bool {
+        let Some(id) = self.pane_at(x, y) else { return false };
+        if id == self.focus {
+            return false;
+        }
+        self.set_focus(id);
+        true
+    }
+
+    /// A scroll gesture aimed at one particular pane.
+    ///
+    /// The pointer decides, not the focus: every terminal with panes scrolls
+    /// what you are pointing at, and scrolling the focused pane while the
+    /// mouse is over a different one reads as the gesture being ignored.
+    pub fn scroll_pane(&mut self, id: PaneId, delta: i32) {
+        let Some(index) = self.panes.iter().position(|p| p.id == id) else { return };
+        let modes = self.panes[index].session.modes();
+        match crate::scroll::route(delta, modes) {
+            crate::scroll::ScrollTarget::Viewport(lines) => {
+                self.panes[index].session.scroll(lines);
+                if self.panes[index].session.has_damage() {
+                    self.renderer.scheduler().request(Reason::Damage);
+                }
+            }
+            crate::scroll::ScrollTarget::Keys(bytes) => {
+                let _ = self.panes[index].session.write_input(&bytes);
+            }
+            crate::scroll::ScrollTarget::Nothing => {}
+        }
+    }
+
     pub fn cursor_line(&self) -> u16 {
-        self.session.cursor().line
+        self.sess().cursor().line
     }
 
     pub fn cursor_column(&self) -> u16 {
-        self.session.cursor().column
+        self.sess().cursor().column
     }
 
     /// Where the caret is actually drawn, in fractional cell coordinates.
     pub fn caret_position(&self) -> [f32; 2] {
-        self.caret.position()
+        self.pane().caret.position()
     }
 
     pub fn cursor_shape(&self) -> CursorShape {
-        self.session.cursor().shape
+        self.sess().cursor().shape
     }
 }
 
@@ -1128,6 +1624,18 @@ fn theme_ids() -> Vec<String> {
 /// Rounded down, and floored at 1×1: a window dragged to zero height must not
 /// produce a zero-row grid, because a terminal with no rows makes every
 /// downstream index calculation undefined.
+/// Whether a divider runs along one of a rectangle's edges.
+fn touches(divider: crate::pane::Divider, rect: CellRect) -> bool {
+    match divider.axis {
+        crate::pane::Axis::Columns => {
+            divider.at + DIVIDER == rect.col || divider.at == rect.col + rect.cols
+        }
+        crate::pane::Axis::Rows => {
+            divider.at + DIVIDER == rect.row || divider.at == rect.row + rect.rows
+        }
+    }
+}
+
 pub fn grid_size(viewport: (u32, u32), cell_width: u16, cell_height: u16) -> (u16, u16) {
     let cols = (viewport.0 / cell_width.max(1) as u32).max(1);
     let rows = (viewport.1 / cell_height.max(1) as u32).max(1);
@@ -1504,15 +2012,17 @@ mod tests {
 
     #[test]
     fn the_palette_offers_only_actions_that_do_something() {
-        // Tabs and panes are bindable and documented, but Mica has neither.
-        // Listing them in the palette would be offering a command that does
-        // nothing when you pick it.
+        // Tabs are bindable and documented; Mica has no tab bar. Listing them
+        // in the palette would be offering a command that does nothing when
+        // you pick it. Panes used to be in that list and are not any more,
+        // which is what makes this test worth keeping either way.
         let mut s = surface("palette-real");
         s.toggle_palette();
         let ids: Vec<&str> = s.palette().actions().iter().map(|a| a.id.as_str()).collect();
         assert!(ids.contains(&"find.toggle"));
+        assert!(ids.contains(&"pane.split_right"), "panes are implemented and still hidden");
         assert!(
-            !ids.contains(&"pane.split_right"),
+            !ids.contains(&"session.new_tab"),
             "the palette is advertising a feature that does not exist"
         );
     }
@@ -1849,5 +2359,98 @@ mod tests {
         s.scheduler().end_frame();
         s.set_focused(false);
         assert!(!s.scheduler().is_dirty(), "an unchanged focus state woke the renderer");
+    }
+
+    #[test]
+    fn a_new_pane_animates_in_and_then_the_window_goes_quiet_again() {
+        // The house rule: an animation is a counter that has to come back to
+        // zero. A split that left the scheduler animating would keep the GPU
+        // awake for as long as the window was open.
+        let mut s = surface("split-motion");
+        let idle = s.scheduler().animations();
+        assert!(s.split(Direction::Right), "the split was refused");
+
+        assert!(s.split_progress().is_some(), "the new pane arrived with no motion at all");
+        assert!(s.scheduler().animations() > idle, "the arrival was never registered");
+
+        let mut seen = vec![s.split_progress().unwrap()];
+        for _ in 0..40 {
+            s.advance(Duration::from_millis(16));
+            if let Some(t) = s.split_progress() {
+                seen.push(t);
+            }
+        }
+        assert!(seen.len() > 2, "the motion finished in a single frame");
+        assert!(
+            seen.windows(2).all(|w| w[1] >= w[0]),
+            "the pane faded backwards at some point: {seen:?}"
+        );
+        assert!(*seen.last().unwrap() > 0.9, "the pane never reached full opacity");
+        assert_eq!(s.split_progress(), None, "the arrival never finished");
+        assert_eq!(s.scheduler().animations(), idle, "the animation count leaked");
+    }
+
+    #[test]
+    fn reduce_motion_collapses_the_arrival_rather_than_skipping_it() {
+        // Reduce Motion is a system preference about vestibular safety, not a
+        // preference for a different feature. The pane still arrives; it just
+        // does not travel.
+        fn frames_to_arrive(s: &mut Surface) -> usize {
+            let mut frames = 0;
+            while s.split_progress().is_some() && frames < 200 {
+                s.advance(Duration::from_millis(16));
+                frames += 1;
+            }
+            frames
+        }
+
+        let mut plain = surface("split-plain");
+        assert!(plain.split(Direction::Down));
+        let ordinary = frames_to_arrive(&mut plain);
+
+        let mut s = surface("split-reduce");
+        s.set_motion(MotionSettings { reduce: true, ..*s.motion() });
+        assert!(s.split(Direction::Down));
+        assert!(s.split_progress().is_some(), "Reduce Motion skipped the arrival entirely");
+        let reduced = frames_to_arrive(&mut s);
+
+        assert!(
+            reduced < ordinary,
+            "Reduce Motion took {reduced} frames against the usual {ordinary}"
+        );
+        assert_eq!(s.pane_count(), 2);
+    }
+
+    #[test]
+    fn a_pane_too_small_to_split_refuses_and_keeps_the_pane_it_has() {
+        // A window this narrow cannot hold two panes. The refusal has to leave
+        // the one shell that is there alone — half-applying it would leave a
+        // layout with a pane in it and no session behind it.
+        let root = temp_root("too-small");
+        let mut s = Surface::open(Settings::default(), (240, 480), 2.0, root.clone(), None)
+            .expect("a surface should open on this machine");
+        s.set_settings_path(root.join("settings.toml"));
+        assert!(!s.split(Direction::Right), "a 15-column window split in two");
+        assert_eq!(s.pane_count(), 1);
+        assert!(s.dispatch("pane.split_right") || s.pane_count() == 1);
+    }
+
+    #[test]
+    fn the_pointer_decides_which_pane_a_scroll_reaches() {
+        // Scrolling the focused pane while the mouse is over another one reads
+        // as the gesture being ignored.
+        let mut s = surface("pointer");
+        assert!(s.split(Direction::Right));
+        let (w, h) = (s.cell_width_points(), s.cell_height_points());
+
+        let left = s.pane_at(w * 2.0, h * 2.0).expect("no pane at the left edge");
+        let right = s
+            .pane_at(s.viewport_points().0 - w * 2.0, h * 2.0)
+            .expect("no pane at the right edge");
+        assert_ne!(left, right, "both ends of the window resolved to one pane");
+
+        // Focus is on the new pane; the pointer is over the other one.
+        assert!(s.focus_pane_at(w * 2.0, h * 2.0), "clicking the other pane did not move focus");
+        assert!(!s.focus_pane_at(w * 2.0, h * 2.0), "clicking the focused pane moved focus again");
     }
 }

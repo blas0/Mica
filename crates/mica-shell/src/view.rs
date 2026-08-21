@@ -291,9 +291,31 @@ define_class!(
                 // trackpad scrolling did nothing at all.
                 return;
             }
-            surface.scroll(lines);
+            // The pointer decides which pane scrolls, not the keyboard focus.
+            let (x, y) = self.point_in_view(event);
+            surface.scroll_at(lines, x, y);
             self.redraw();
         }
+
+        /// A click focuses the pane under it.
+        ///
+        /// The only way to move focus with the mouse, and the reason panes do
+        /// not need a title bar to be usable. A click on a divider is ignored
+        /// rather than guessing which side was meant.
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, event: &NSEvent) {
+            let (x, y) = self.point_in_view(event);
+            let moved = self
+                .ivars()
+                .surface
+                .borrow_mut()
+                .as_mut()
+                .is_some_and(|s| s.focus_pane_at(x, y));
+            if moved {
+                self.redraw();
+            }
+        }
+
 
         #[unsafe(method(setFrameSize:))]
         fn set_frame_size(&self, size: NSSize) {
@@ -325,6 +347,20 @@ define_class!(
 );
 
 impl MicaView {
+    /// An event's location in this view, in points from the **top** left.
+    ///
+    /// AppKit's origin is bottom-left and the grid counts rows downward, so
+    /// the flip happens here rather than by making the view flipped: a
+    /// layer-backed view that reports `isFlipped` also flips its layer's
+    /// geometry, and this one has a `CAMetalLayer` in it whose contents are
+    /// already the right way up.
+    fn point_in_view(&self, event: &NSEvent) -> (f32, f32) {
+        let window_point = unsafe { event.locationInWindow() };
+        let point = self.convertPoint_fromView(window_point, None);
+        let height = self.bounds().size.height;
+        (point.x as f32, (height - point.y) as f32)
+    }
+
     pub fn new(mtm: MainThreadMarker, frame: NSRect) -> Retained<MicaView> {
         let this = MicaView::alloc(mtm).set_ivars(MicaViewState {
             surface: RefCell::new(None),

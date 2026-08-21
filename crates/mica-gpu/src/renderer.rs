@@ -507,7 +507,8 @@ mod tests {
             Cell::EMPTY,
         ];
 
-        let builder = RowBuilder { material: &material, tables: &tables, metrics, alpha: 1.0 };
+        let builder =
+            RowBuilder { material: &material, tables: &tables, metrics, alpha: 1.0, origin: (0, 0) };
         let mut buffers = InstanceBuffers::default();
         builder.build_row(
             RowRef { index: 0, cells: &cells, wrapped: false },

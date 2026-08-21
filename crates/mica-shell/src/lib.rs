@@ -9,6 +9,7 @@ pub mod app;
 pub mod bindings;
 pub mod config;
 pub mod keys;
+pub mod pane;
 pub mod scroll;
 pub mod shortcut_panel;
 pub mod surface;

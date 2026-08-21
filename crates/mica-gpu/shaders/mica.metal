@@ -289,6 +289,8 @@ struct GutterInstance {
     uchar4  color;
     float   width;      // device pixels
     float   radius;
+    ushort  column;     // the pane's left edge, in cells
+    ushort  _pad;
 };
 
 struct GutterVaryings {
@@ -306,7 +308,7 @@ vertex GutterVaryings block_gutter_vertex(uint vid [[vertex_id]],
     GutterInstance inst = instances[iid];
     float2 corner = unit_corner(vid);
     float2 size = float2(inst.width, u.cell.y * float(inst.rows));
-    float2 pixel = float2(u.origin.x - inst.width * 2.0,
+    float2 pixel = float2(u.origin.x + float(inst.column) * u.cell.x - inst.width * 2.0,
                           u.origin.y + float(inst.row) * u.cell.y) + corner * size;
 
     GutterVaryings out;
