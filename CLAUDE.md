@@ -20,4 +20,3 @@ Standard operation procedures while working within, or on `Mica`
 8. 75mb < Memory after 15k lines
 9. 15mb < Memory after 15k lines
 10. PTY in → 10ms (15k lines, weighted)
-11. 
