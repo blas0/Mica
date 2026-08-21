@@ -25,5 +25,6 @@ Terminal emulator focused on smooth motion and lightweight rendering.
 ### Keyboard
 
 Keyboard Shortcuts: `cmd+shift+k`
+
 Settings: `cmd+,`
 
