@@ -12,7 +12,7 @@ Terminal emulator focused on smooth motion and lightweight rendering.
 - Diverging from biased appendages
 
 > [!NOTE]
-> **Projected release**: 8/20/26
+> **Projected release**: 2026 August
 
 ### Primary Features
 
