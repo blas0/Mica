@@ -2,9 +2,9 @@
 
 A GPU-rendered terminal for macOS. Rust, Metal 3, four crates.
 
-Built by following [`../BUILD-ORDER.md`](../../BUILD-ORDER.md), which synthesises
-[`../POC-spec.md`](../../POC-spec.md) (Metalterm's public product surface) and
-[`../POC-spec-2.md`](../../POC-spec-2.md) (what its compiled binary actually
+Built by following [`BUILD-ORDER.md`](../../BUILD-ORDER.md), which synthesises
+[`POC-spec.md`](../../POC-spec.md) (Metalterm's public product surface) and
+[`POC-spec-2.md`](../../POC-spec-2.md) (what its compiled binary actually
 contains) into an executable sequence.
 
 Mica is an **independent implementation informed by that architecture**. No
