@@ -563,6 +563,16 @@ impl Surface {
         if let Some(theme) = id.strip_prefix("theme.") {
             return self.set_theme(theme);
         }
+        // A `text:` binding types for the user. Deliberately not wrapped in
+        // bracketed paste: that sequence exists to tell a program "this arrived
+        // from a clipboard, do not run it", and a chord the user bound is the
+        // other kind — it is a keystroke they configured. Wrapping it would
+        // also make an escape-prefixed binding unusable, which is half the
+        // point of the feature.
+        if let Some(text) = crate::bindings::text_payload(id) {
+            self.write_input(text.as_bytes());
+            return true;
+        }
         match id {
             "session.scroll_bottom" => {
                 self.sess_mut().scroll_to_bottom();

@@ -11,6 +11,21 @@
 //! committable, and there is no second surface that can disagree with it.
 //! `⌘⇧K` opens the shortcut panel, which edits exactly one section of the same
 //! file.
+//!
+//! ## Three surfaces, three verbs
+//!
+//! - **`settings.toml`** (`⌘,`) *records*. It persists, diffs, commits and
+//!   travels, and it is the only writer — the other two save through it, so no
+//!   surface can disagree with the file.
+//! - **The shortcut panel** (`⌘⇧K`) *captures*. It is the only surface that can
+//!   learn a chord from the press rather than from a spelling, and name the
+//!   binding that press would displace.
+//! - **The palette** (`F5`) *runs*. One-shot actions — scroll to top, jump to a
+//!   block, try a theme. Not configuration.
+//!
+//! The palette's `settings.fx.*` and `theme.*` entries are the one deliberate
+//! overlap: settings-file values with a fast switch attached, kept because
+//! trying a caret style by watching it is not the same act as editing a file.
 
 use std::path::{Path, PathBuf};
 
@@ -20,8 +35,12 @@ use mica_core::settings::Settings;
 use crate::bindings::{Bindings, Chord, BINDABLE};
 
 /// Every bindable action, with what it is bound to right now.
+///
+/// The user's `text:` bindings come last. They are not in [`BINDABLE`] — there
+/// is no fixed catalogue of them — but the file is rewritten from this list, so
+/// leaving them out would mean opening Settings deleted them.
 pub fn key_docs(bindings: &Bindings) -> Vec<KeyDoc> {
-    BINDABLE
+    let mut docs: Vec<KeyDoc> = BINDABLE
         .iter()
         .map(|bindable| KeyDoc {
             action: bindable.id.to_owned(),
@@ -29,7 +48,18 @@ pub fn key_docs(bindings: &Bindings) -> Vec<KeyDoc> {
             chord: bindings.chord_for(bindable.id).map(Chord::to_config).unwrap_or_default(),
             implemented: bindable.implemented,
         })
-        .collect()
+        .collect();
+    for (action, chord) in bindings.overrides() {
+        if crate::bindings::text_payload(&action).is_some() {
+            docs.push(KeyDoc {
+                action,
+                label: "Send text".to_owned(),
+                chord,
+                implemented: true,
+            });
+        }
+    }
+    docs
 }
 
 pub fn path() -> PathBuf {
@@ -219,6 +249,54 @@ mod tests {
         std::fs::write(&file, broken).unwrap();
         refresh(&file, &Settings::default(), &key_docs(&Bindings::defaults())).unwrap();
         assert_eq!(std::fs::read_to_string(&file).unwrap(), broken);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_text_binding_survives_the_settings_file() {
+        // `⌘,` re-renders the whole file from `key_docs`. A text binding is not
+        // in BINDABLE, so if `key_docs` did not carry it, opening Settings
+        // would delete every one of the user's text bindings — silently, and in
+        // the act of showing them the file.
+        let dir = std::env::temp_dir().join(format!("mica-textbind-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let file = dir.join("settings.toml");
+
+        let mut overrides = std::collections::BTreeMap::new();
+        overrides.insert("text:probe-payload-42\n".to_owned(), "cmd+shift+l".to_owned());
+        let bindings = Bindings::from_overrides(&overrides);
+        let keys = key_docs(&bindings);
+
+        ensure(&file, &Settings::default(), &keys).unwrap();
+        refresh(&file, &Settings::default(), &keys).unwrap();
+
+        let written = std::fs::read_to_string(&file).unwrap();
+        let parsed = Settings::parse(&written).unwrap();
+        let chord = Chord::parse("cmd+shift+l").unwrap();
+        assert_eq!(
+            Bindings::from_overrides(&parsed.keys).action(chord),
+            Some("text:probe-payload-42\n"),
+            "the text binding did not come back out of the file:\n{written}"
+        );
+
+        // The payload holds a newline. It belongs in the value half of the
+        // file, where TOML escapes it — never in the comment catalogue, where a
+        // raw newline would end the comment and take the rest of the catalogue
+        // with it.
+        let catalogue = written
+            .split(mica_core::reference::FLAGS_END)
+            .next()
+            .expect("the file has a catalogue");
+        // The catalogue explains what `text:` means; it must not print the
+        // user's payload, which is the part that can carry a newline.
+        assert!(
+            !catalogue.contains("probe-payload-42"),
+            "a text binding was printed into the catalogue:\n{catalogue}"
+        );
+        for line in catalogue.lines().skip(1) {
+            assert!(line.starts_with('#') || line.is_empty(), "uncommented line: {line:?}");
+        }
 
         let _ = std::fs::remove_dir_all(&dir);
     }

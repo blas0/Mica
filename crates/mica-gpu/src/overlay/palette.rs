@@ -1,4 +1,4 @@
-//! The command palette — `⌘⇧P`.
+//! The command palette — `F5`.
 //!
 //! Every setting, theme, and action behind one fuzzy field. Action ids are flat
 //! `namespace.verb` strings with a human description each, which is what lets
@@ -8,6 +8,21 @@
 //! Ranked by [`crate::search::fuzzy_match`], which is a real search rather than
 //! a greedy scan — see that module for why the difference is visible to the
 //! user on the very first query anyone types.
+//!
+//! ## Three surfaces, three verbs
+//!
+//! - **`settings.toml`** (`⌘,`) *records*. It persists, diffs, commits and
+//!   travels, and it is the only writer — the other two save through it, so no
+//!   surface can disagree with the file.
+//! - **The shortcut panel** (`⌘⇧K`) *captures*. It is the only surface that can
+//!   learn a chord from the press rather than from a spelling, and name the
+//!   binding that press would displace.
+//! - **The palette** (`F5`) *runs*. One-shot actions — scroll to top, jump to a
+//!   block, try a theme. Not configuration.
+//!
+//! The palette's `settings.fx.*` and `theme.*` entries are the one deliberate
+//! overlap: settings-file values with a fast switch attached, kept because
+//! trying a caret style by watching it is not the same act as editing a file.
 
 use mica_atlas::atlas::Atlas;
 use mica_atlas::fontset::Style;

@@ -22,6 +22,17 @@
 //! Written in the same only-what-differs style as the rest of the file, so a
 //! user who has rebound one key has a one-line diff rather than a wall of
 //! defaults.
+//!
+//! One action id is not in the table at all. `text:…` types the rest of its
+//! own name into the shell, so the id carries the payload:
+//!
+//! ```toml
+//! [keys]
+//! "text:clear && ls -la\n" = "cmd+shift+l"
+//! ```
+//!
+//! See [`text_payload`]. It is a file-only feature — the shortcut panel edits
+//! the fixed catalogue below and has no field for an arbitrary string.
 
 use std::collections::BTreeMap;
 
@@ -148,6 +159,28 @@ impl Chord {
         out.push_str(&key_display_name(self.key));
         out
     }
+}
+
+/// The bytes a `text:` binding sends, if that is what this action is.
+///
+/// The action id *carries* the payload rather than pointing at it:
+///
+/// ```toml
+/// [keys]
+/// "text:clear && ls -la\n" = "cmd+shift+l"
+/// ```
+///
+/// One map from chord to action, one conflict check, no second table to keep
+/// in step. The escape rules are TOML's own — `\n`, `\t`, `\r`, `\\`, `\"`,
+/// `\uXXXX` in a basic string, nothing at all in a literal one — because a
+/// second escape dialect on top of the file format's is a thing to get wrong
+/// twice.
+///
+/// An empty payload is not a binding, so `"text:"` is refused rather than
+/// wiring a key to nothing.
+pub fn text_payload(id: &str) -> Option<&str> {
+    let text = id.strip_prefix("text:")?;
+    (!text.is_empty()).then_some(text)
 }
 
 fn key_config_name(key: Key) -> String {
@@ -399,6 +432,14 @@ impl Bindings {
     pub fn overrides(&self) -> BTreeMap<String, String> {
         let defaults = Bindings::defaults();
         let mut out = BTreeMap::new();
+        // Text bindings are not in `BINDABLE` — there is no fixed catalogue of
+        // them — so they are collected from the map itself. Without this a save
+        // from the shortcut panel would quietly delete every one of them.
+        for (chord, action) in &self.map {
+            if text_payload(action).is_some() {
+                out.insert(action.clone(), chord.to_config());
+            }
+        }
         for bindable in BINDABLE {
             let mine = self.chord_for(bindable.id);
             let theirs = defaults.chord_for(bindable.id);
@@ -423,7 +464,7 @@ impl Bindings {
     pub fn from_overrides(overrides: &BTreeMap<String, String>) -> Bindings {
         let mut bindings = Bindings::defaults();
         for (id, chord) in overrides {
-            if !BINDABLE.iter().any(|b| b.id == id) {
+            if !BINDABLE.iter().any(|b| b.id == id) && text_payload(id).is_none() {
                 continue;
             }
             if chord.is_empty() {
@@ -730,4 +771,54 @@ mod tests {
         assert_eq!(bindings.chord_for("settings.open"), Chord::parse("cmd+,"));
     }
 
+    #[test]
+    fn a_text_binding_carries_its_payload() {
+        assert_eq!(text_payload("text:clear\n"), Some("clear\n"));
+        assert_eq!(text_payload("text:\u{1b}[A"), Some("\u{1b}[A"));
+        assert_eq!(text_payload("find.toggle"), None);
+        assert_eq!(text_payload("textual.thing"), None);
+    }
+
+    #[test]
+    fn an_empty_text_binding_is_refused() {
+        assert_eq!(text_payload("text:"), None);
+
+        // And it does not reach the table, so the key it names stays the
+        // shell's rather than being bound to sending nothing.
+        let mut overrides = BTreeMap::new();
+        overrides.insert("text:".to_owned(), "cmd+shift+y".to_owned());
+        let bindings = Bindings::from_overrides(&overrides);
+        assert_eq!(bindings.action(Chord::parse("cmd+shift+y").unwrap()), None);
+    }
+
+    #[test]
+    fn a_text_binding_survives_a_round_trip_through_the_overrides() {
+        // `overrides()` walks BINDABLE, which a text binding is deliberately
+        // not in. Without the extra pass it collects them by, saving from the
+        // shortcut panel would silently delete every one.
+        let mut overrides = BTreeMap::new();
+        overrides.insert("text:clear && ls -la\n".to_owned(), "cmd+shift+l".to_owned());
+        let bindings = Bindings::from_overrides(&overrides);
+        let chord = Chord::parse("cmd+shift+l").unwrap();
+        assert_eq!(bindings.action(chord), Some("text:clear && ls -la\n"));
+
+        let written = bindings.overrides();
+        // Compared as a chord, not as a string: `to_config` writes modifiers in
+        // its own fixed order (ctrl, alt, shift, cmd), which is the point of
+        // having one.
+        assert_eq!(
+            written.get("text:clear && ls -la\n").map(String::as_str).and_then(Chord::parse),
+            Some(chord),
+            "a text binding did not survive being written back out"
+        );
+        assert_eq!(Bindings::from_overrides(&written).action(chord), bindings.action(chord));
+    }
+
+    #[test]
+    fn a_text_binding_is_not_offered_in_the_shortcut_panel() {
+        // The panel edits the fixed catalogue of actions Mica implements. A
+        // text binding is an unbounded string it has no field for, so it is a
+        // file-only feature and the catalogue must not grow a row for it.
+        assert!(BINDABLE.iter().all(|b| text_payload(b.id).is_none()));
+    }
 }
