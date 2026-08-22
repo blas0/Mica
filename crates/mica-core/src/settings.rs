@@ -582,6 +582,19 @@ impl SettingsWatcher {
         self.last_modified = current;
         Some(Settings::load(&self.path))
     }
+
+    /// Reads the file whatever its mtime says, for an explicit reload.
+    ///
+    /// [`poll`](Self::poll) answering `None` means "nothing changed", which is
+    /// the right answer for a background check and the wrong one for a key the
+    /// user deliberately pressed: *nothing happened* and *nothing needed to
+    /// happen* must not look the same when somebody asked. This also
+    /// resynchronises the watcher, so the next activation does not then apply
+    /// the same file a second time.
+    pub fn reread(&mut self) -> Result<Settings, SettingsError> {
+        self.last_modified = modified_time(&self.path);
+        Settings::load(&self.path)
+    }
 }
 
 fn modified_time(path: &Path) -> Option<std::time::SystemTime> {
@@ -729,6 +742,26 @@ substitute_spinner = true
 
         s.save(&path, &[]).unwrap();
         assert_eq!(Settings::load(&path).unwrap(), s);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rereading_returns_the_file_even_when_the_mtime_has_not_moved() {
+        // The difference between a background poll and a key the user pressed:
+        // "nothing changed" is a fine answer to the first and a useless one to
+        // the second.
+        let dir = std::env::temp_dir().join(format!("mica-reread-{}", std::process::id()));
+        let path = dir.join("settings.toml");
+        let s = Settings { theme: "quartz".into(), ..Settings::default() };
+        s.save(&path, &[]).unwrap();
+
+        let mut watcher = SettingsWatcher::new(path.clone());
+        assert!(watcher.poll().is_none(), "a file that has not moved has nothing to report");
+        assert_eq!(watcher.reread().unwrap().theme, "quartz");
+        // And the manual read resynchronised the watcher, so the next
+        // activation does not apply the same file a second time.
+        assert!(watcher.poll().is_none());
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

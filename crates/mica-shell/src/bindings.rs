@@ -105,6 +105,14 @@ impl Chord {
         out
     }
 
+    /// Reads the `settings.toml` spelling back.
+    ///
+    /// A chord is one key and its modifiers, so a spelling that names two keys
+    /// — `cmd+,+r`, the natural way to write "⌘, then R" — is **refused**
+    /// rather than resolved. It used to let the second key win, which turned
+    /// that line into `⌘R`: a chord the user never asked for, bound to an
+    /// action they did, with nothing said. A file that quietly means something
+    /// else is worse than a file that is rejected.
     pub fn parse(text: &str) -> Option<Chord> {
         let mut modifiers = Modifiers::NONE;
         let mut key = None;
@@ -114,7 +122,8 @@ impl Chord {
                 "ctrl" | "control" => modifiers.control = true,
                 "alt" | "opt" | "option" => modifiers.alt = true,
                 "shift" => modifiers.shift = true,
-                name => key = Some(parse_key_name(name)?),
+                name if key.is_none() => key = Some(parse_key_name(name)?),
+                _ => return None,
             }
         }
         Some(Chord::new(modifiers, key?))
@@ -243,6 +252,7 @@ pub struct Bindable {
 pub const BINDABLE: &[Bindable] = &[
     Bindable { id: "palette.toggle", label: "Command Palette", implemented: true },
     Bindable { id: "settings.open", label: "Settings", implemented: true },
+    Bindable { id: "settings.reload", label: "Reload Settings", implemented: true },
     Bindable { id: "keys.open", label: "Keyboard Shortcuts", implemented: true },
     Bindable { id: "find.toggle", label: "Find in Scrollback", implemented: true },
     Bindable { id: "find.next", label: "Next Match", implemented: true },
@@ -311,6 +321,10 @@ impl Bindings {
         // (`CSI 15~`); unbind it in `[keys]` if a program needs it.
         bind(Modifiers::NONE, Key::Function(5), "palette.toggle");
         bind(cmd, Key::Char(','), "settings.open");
+        // One modifier apart from the key that opens the file, because they
+        // are the two halves of one loop: edit it, then apply it. `⌘,` then
+        // `R` would need a prefix mode, and nothing else in Mica wants one.
+        bind(cmd_shift, Key::Char(','), "settings.reload");
         bind(cmd_shift, Key::Char('k'), "keys.open");
         bind(cmd, Key::Char('f'), "find.toggle");
         bind(cmd, Key::Char('g'), "find.next");
@@ -679,4 +693,41 @@ mod tests {
         );
         assert_eq!(bindings.action(Chord::new(cmd(), Key::Char('k'))), None);
     }
+
+    #[test]
+    fn a_chord_with_two_keys_is_refused_rather_than_guessed() {
+        // `cmd+,+r` is the natural way to write "⌘, then R", and Mica has no
+        // prefix chords. It used to let the second key win and hand back ⌘R —
+        // a working binding for a chord nobody asked for.
+        assert_eq!(Chord::parse("cmd+,+r"), None);
+        assert_eq!(Chord::parse("cmd+a+b"), None);
+        // The ordinary spellings are untouched, in every modifier order.
+        assert_eq!(
+            Chord::parse("cmd+shift+p"),
+            Some(Chord::new(
+                Modifiers { command: true, shift: true, ..Modifiers::NONE },
+                Key::Char('p')
+            ))
+        );
+        assert_eq!(
+            Chord::parse("shift+cmd+p"),
+            Chord::parse("cmd+shift+p"),
+            "modifier order is not supposed to matter"
+        );
+        assert!(Chord::parse("cmd+,").is_some());
+    }
+
+    #[test]
+    fn the_reload_action_is_bindable_and_bound() {
+        assert!(BINDABLE.iter().any(|b| b.id == "settings.reload" && b.implemented));
+        let bindings = Bindings::defaults();
+        assert_eq!(
+            bindings.chord_for("settings.reload"),
+            Chord::parse("cmd+shift+,"),
+            "reload should sit one modifier from the ⌘, that opens the file"
+        );
+        // And it must not have taken the opener's key while doing so.
+        assert_eq!(bindings.chord_for("settings.open"), Chord::parse("cmd+,"));
+    }
+
 }

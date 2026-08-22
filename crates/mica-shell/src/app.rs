@@ -158,6 +158,22 @@ impl AppDelegate {
     /// mid-edit in another window — is a worse outcome than a line on stderr.
     fn reload_settings(&self) {
         let Some(result) = self.ivars().watcher.borrow_mut().poll() else { return };
+        self.apply_reload(result);
+    }
+
+    /// Applies the settings file because the user asked, not because it moved.
+    ///
+    /// Bound to `⌘⇧,` — one modifier from the `⌘,` that opens the file, because
+    /// they are the two halves of one loop. Unlike the activation poll this
+    /// re-reads unconditionally: the point of pressing a key is to be certain
+    /// the file on disk is the file in force, and an mtime that has not moved
+    /// is not an answer to that question.
+    pub fn reload_settings_now(&self) {
+        let result = self.ivars().watcher.borrow_mut().reread();
+        self.apply_reload(result);
+    }
+
+    fn apply_reload(&self, result: Result<Settings, mica_core::settings::SettingsError>) {
         let path = crate::config::path();
         let settings = match result {
             Ok(settings) => settings,
