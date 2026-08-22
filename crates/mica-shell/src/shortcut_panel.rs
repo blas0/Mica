@@ -1,4 +1,4 @@
-//! The keyboard shortcut editor: `⌘,`.
+//! The keyboard shortcut editor: `⌘⇧K`.
 //!
 //! Arrow keys move, space starts capturing, the next combination becomes the
 //! binding, backspace unbinds, escape backs out. Deliberately modal: while
