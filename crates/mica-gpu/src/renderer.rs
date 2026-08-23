@@ -273,6 +273,7 @@ impl Renderer {
         }
 
         pass!(cell_bg, &self.buffers.backgrounds, "mica.cell_bg", false);
+        pass!(cell_bg, &self.buffers.selections, "mica.selection", false);
         // **The caret and its wake go under the text, not over it.** A block
         // caret drawn on top is opaque, and it erases the glyph beneath it
         // completely — measured: 79 foreground pixels in the cell without it,

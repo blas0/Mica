@@ -74,7 +74,7 @@ pub fn document(settings: &Settings, keys: &[KeyDoc]) -> Result<String, Settings
     out.push_str("# Edits apply when Mica next becomes the active application — save\n");
     out.push_str("# here, switch back, done. Without leaving Mica, press cmd+shift+,\n");
     out.push_str("# to apply this file where it stands. Theme, caret motion, ambient\n");
-    out.push_str("# light and key bindings take effect immediately; font, grid size,\n");
+    out.push_str("# light, selection policy and key bindings take effect immediately; font, grid size,\n");
     out.push_str("# scrollback and [shell] wait for the next launch.\n");
     out.push('\n');
 
@@ -139,6 +139,9 @@ fn flags(out: &mut String, keys: &[KeyDoc]) {
     flag(out, "starting-dir", "absolute path or ~/…   (default: your home directory)");
     flag(out, "new-pane-from-focused-pane", "inherit | starting-dir   (default: inherit)");
     flag(out, "focus-new-panes", "true | false   (default: true)");
+
+    section(out, "selection", "mouse selection and the clipboard");
+    flag(out, "copy-on-select", "true | false   (default: false)");
 
     section(out, "ambient", "the light behind the grid");
     flag(out, "enabled", "true | false   (default: true)");
@@ -249,7 +252,7 @@ mod tests {
         assert_eq!(Settings::parse(&text).unwrap(), as_written(&Settings::default()));
 
         let config = text.split_once(CONFIG_START).unwrap().1;
-        for section in ["[appearance]", "[window]", "[renderer]", "[motion]", "[ambient]", "[shell]", "[keys]"] {
+        for section in ["[appearance]", "[window]", "[renderer]", "[motion]", "[ambient]", "[shell]", "[selection]", "[keys]"] {
             assert!(config.contains(section), "`{section}` is missing from the configuration:\n{config}");
         }
         assert!(
@@ -299,7 +302,7 @@ mod tests {
             .unwrap()
             .0;
         for name in
-            ["appearance", "window", "shell", "ambient", "renderer", "motion", "keys"]
+            ["appearance", "window", "shell", "selection", "ambient", "renderer", "motion", "keys"]
         {
             assert!(catalogue.contains(&format!("[{name}]")), "`{name}` is undocumented");
         }

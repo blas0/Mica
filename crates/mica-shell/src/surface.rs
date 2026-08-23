@@ -9,8 +9,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use mica_atlas::atlas::Atlas;
-use mica_atlas::fontset::FontSet;
-use mica_core::backend::CursorShape;
+use mica_atlas::fontset::{FontSet, Style};
+use mica_core::backend::{
+    CursorShape, MouseEncoding, MouseTracking, Point, Selection, SelectionKind,
+};
 use mica_core::material::{builtin, Material, Role};
 use mica_core::motion::{Caret, Crossfade, MotionSettings};
 use mica_core::pty::PtyConfig;
@@ -18,10 +20,11 @@ use mica_core::session::{Session, SessionEvent};
 use mica_core::settings::Settings;
 use mica_gpu::frame::Reason;
 use mica_gpu::grid::{
-    block_gutters, caret_decay, cursor_shape, Rgba, RowBuilder, SubstrateUniforms, Uniforms,
+    block_gutters, caret_decay, cursor_shape, BgInstance, Rgba, RowBuilder, SubstrateUniforms,
+    Uniforms,
 };
 use mica_gpu::overlay::find::Find;
-use mica_gpu::overlay::OverlayMetrics;
+use mica_gpu::overlay::{fill, layout_text, OverlayMetrics};
 use mica_gpu::renderer::Renderer;
 
 use crate::bindings::Bindings;
@@ -49,6 +52,30 @@ struct Pane {
 struct SplitMotion {
     pane: PaneId,
     fade: Crossfade,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SelectionDrag {
+    pane: PaneId,
+    anchor: Point,
+    kind: SelectionKind,
+    moved: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseButton {
+    Left,
+    Middle,
+    Right,
+    WheelUp,
+    WheelDown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseAction {
+    Press,
+    Release,
+    Motion,
 }
 
 pub struct Surface {
@@ -106,6 +133,9 @@ pub struct Surface {
     focused: bool,
     title: String,
     find: Find,
+    /// Uncommitted text owned by the macOS input method. Empty outside an IME
+    /// composition, so ordinary terminal frames pay no work for it.
+    composition: String,
     /// The chord table the window dispatches through. Edited in
     /// `settings.toml`, which is the only place it can be edited.
     bindings: Bindings,
@@ -116,6 +146,7 @@ pub struct Surface {
     /// the suite rewrote the developer's own settings file — which it did,
     /// once, before this existed.
     settings_path: PathBuf,
+    selection_drag: Option<SelectionDrag>,
 }
 
 impl std::fmt::Debug for Surface {
@@ -246,8 +277,10 @@ impl Surface {
             focused: true,
             title: String::from("Mica"),
             find: Find::new(),
+            composition: String::new(),
             bindings,
             settings_path: crate::config::path(),
+            selection_drag: None,
         };
         Ok(surface)
     }
@@ -564,6 +597,103 @@ impl Surface {
         self.sess().selection_text()
     }
 
+    pub fn hyperlink_at(&self, x: f32, y: f32) -> Option<String> {
+        let pane = self.pane_at(x, y)?;
+        let point = self.point_in_pane(pane, x, y)?;
+        self.panes
+            .iter()
+            .find(|candidate| candidate.id == pane)?
+            .session
+            .hyperlink_at(point)
+    }
+
+    pub fn accessibility_text(&self) -> String {
+        self.sess().visible_text()
+    }
+
+    pub fn set_composition(&mut self, text: &str) {
+        if self.composition == text {
+            return;
+        }
+        self.composition.clear();
+        self.composition.push_str(text);
+        self.renderer.scheduler().request(Reason::Overlay);
+    }
+
+    /// Starts a terminal-native selection at a point in the view.
+    ///
+    /// Double- and triple-click selection are represented in the backend, not
+    /// approximated by the AppKit layer, so punctuation and wrapped lines use
+    /// the same rules as copied text.
+    pub fn begin_selection(&mut self, x: f32, y: f32, kind: SelectionKind) -> bool {
+        let Some(pane) = self.pane_at(x, y) else { return false };
+        self.set_focus(pane);
+        let Some(point) = self.point_in_pane(pane, x, y) else { return false };
+
+        for candidate in &mut self.panes {
+            if candidate.id != pane {
+                candidate.session.set_selection(None);
+            }
+        }
+        self.pane_mut().session.set_selection(Some(Selection {
+            start: point,
+            end: point,
+            kind,
+        }));
+        self.selection_drag = Some(SelectionDrag { pane, anchor: point, kind, moved: false });
+        self.renderer.scheduler().request(Reason::Selection);
+        true
+    }
+
+    /// Extends the current drag, clamping it to the pane where it began.
+    pub fn update_selection(&mut self, x: f32, y: f32) -> bool {
+        let Some(drag) = self.selection_drag else { return false };
+        let Some(point) = self.clamped_point_in_pane(drag.pane, x, y) else { return false };
+        let Some(pane) = self.panes.iter_mut().find(|pane| pane.id == drag.pane) else {
+            self.selection_drag = None;
+            return false;
+        };
+        pane.session.set_selection(Some(Selection {
+            start: drag.anchor,
+            end: point,
+            kind: drag.kind,
+        }));
+        self.selection_drag = Some(SelectionDrag {
+            moved: drag.moved || point != drag.anchor,
+            ..drag
+        });
+        self.renderer.scheduler().request(Reason::Selection);
+        true
+    }
+
+    /// Ends a drag but keeps the selected range available for Copy.
+    pub fn finish_selection(&mut self) -> Option<String> {
+        let drag = self.selection_drag.take()?;
+        if !drag.moved && matches!(drag.kind, SelectionKind::Simple | SelectionKind::Block) {
+            if let Some(pane) = self.panes.iter_mut().find(|pane| pane.id == drag.pane) {
+                pane.session.set_selection(None);
+            }
+            self.renderer.scheduler().request(Reason::Selection);
+            return None;
+        }
+        self.panes
+            .iter()
+            .find(|pane| pane.id == drag.pane)
+            .and_then(|pane| pane.session.selection_text())
+    }
+
+    /// Selects the focused pane's complete retained buffer, including history.
+    pub fn select_all(&mut self) {
+        let (cols, _) = self.sess().dimensions();
+        self.sess_mut().set_selection(Some(Selection {
+            start: Point::new(i32::MIN, 0),
+            end: Point::new(i32::MAX, cols.saturating_sub(1)),
+            kind: SelectionKind::Simple,
+        }));
+        self.selection_drag = None;
+        self.renderer.scheduler().request(Reason::Selection);
+    }
+
     pub fn session(&mut self) -> &mut Session {
         self.sess_mut()
     }
@@ -583,6 +713,10 @@ impl Surface {
     pub fn set_focused(&mut self, focused: bool) {
         if self.focused != focused {
             self.focused = focused;
+            if self.sess().modes().focus_reporting {
+                let bytes: &[u8] = if focused { b"\x1b[I" } else { b"\x1b[O" };
+                let _ = self.sess_mut().write_input(bytes);
+            }
             self.renderer.scheduler().request(Reason::Focus);
         }
     }
@@ -608,11 +742,11 @@ impl Surface {
                         focus_title = Some(pane.title.clone());
                     }
                 }
-                // Only the focused pane's events reach the window layer. A
-                // background pane ringing the bell or renaming itself is not
-                // the window's business, and letting those through would let
-                // an unfocused shell retitle the window.
-                if pane.id == focus {
+                // Window identity and clipboard ownership follow focus. Bells
+                // and explicit notifications do not: their purpose is to tell
+                // the user that work completed in a pane they are not watching.
+                let global = matches!(event, SessionEvent::Notification { .. } | SessionEvent::Bell);
+                if pane.id == focus || global {
                     events.push(event);
                 }
             }
@@ -647,7 +781,19 @@ impl Surface {
     }
 
     pub fn write_input(&mut self, bytes: &[u8]) {
+        if self.sess().selection().is_some() {
+            self.sess_mut().set_selection(None);
+            self.selection_drag = None;
+            self.renderer.scheduler().request(Reason::Selection);
+        }
         let _ = self.sess_mut().write_input(bytes);
+    }
+
+    /// Sends clipboard text in the form the focused child negotiated.
+    pub fn paste(&mut self, text: &str) {
+        let bracketed = self.sess().modes().bracketed_paste;
+        let bytes = paste_payload(text, bracketed);
+        self.write_input(&bytes);
     }
 
     /// One scroll gesture, already converted to whole lines.
@@ -764,10 +910,10 @@ impl Surface {
     /// Applies a settings file that changed on disk.
     ///
     /// Only what can change under a running shell: theme, caret physics,
-    /// ambient light, and the key bindings. Font, grid size and scrollback are
-    /// deliberately left for the next launch — reflowing a live grid under a
-    /// program that is drawing into it is a different feature, and a settings
-    /// reload is the wrong place to discover that.
+    /// ambient light, selection policy, and key bindings. Font, grid size and
+    /// scrollback are deliberately left for the next launch — reflowing a live
+    /// grid under a program that is drawing into it is a different feature,
+    /// and a settings reload is the wrong place to discover that.
     ///
     /// Returns what was *not* applied, so the caller can say so rather than
     /// leaving the user to wonder why their font did not change.
@@ -791,6 +937,7 @@ impl Surface {
         let ambient_changed = settings.ambient != self.settings.ambient;
         self.settings.ambient = settings.ambient;
         self.settings.bell = settings.bell;
+        self.settings.selection = settings.selection;
         self.settings.keys = settings.keys.clone();
         self.bindings = Bindings::from_overrides(&settings.keys);
 
@@ -1023,7 +1170,13 @@ impl Surface {
         if self.focus == id || !self.panes.iter().any(|p| p.id == id) {
             return;
         }
+        if self.focused && self.sess().modes().focus_reporting {
+            let _ = self.sess_mut().write_input(b"\x1b[O");
+        }
         self.focus = id;
+        if self.focused && self.sess().modes().focus_reporting {
+            let _ = self.sess_mut().write_input(b"\x1b[I");
+        }
         // Both carets change: one lights up, one hollows out. And the divider
         // beside the newly focused pane changes colour, which is a quad rather
         // than a cell, so damage alone would not redraw it.
@@ -1203,6 +1356,18 @@ impl Surface {
             *self.renderer.buffers() = buffers;
         }
 
+        // Selection changes are independent of terminal damage. Emit one
+        // translucent rectangle per visible selected row, rather than walking
+        // every cell or invalidating the cached glyph instances.
+        let selection_color = Rgba::with_alpha(self.display_material.role(Role::Accent), 0.34);
+        let mut selections = std::mem::take(&mut self.renderer.buffers().selections);
+        for pane in &self.panes {
+            if let Some(selection) = pane.session.selection() {
+                selection_instances(selection, pane.rect, selection_color, &mut selections);
+            }
+        }
+        self.renderer.buffers().selections = selections;
+
         // The lines between the panes. Drawn from the layout rather than from
         // the panes, because the divider cell belongs to neither of them.
         self.build_dividers(metrics);
@@ -1247,6 +1412,37 @@ impl Surface {
         self.renderer.buffers().shapes = shapes;
         self.renderer.buffers().gutters = gutters;
         let (_, rows) = self.sess().dimensions();
+
+        if !self.composition.is_empty() {
+            let pane = self.pane();
+            let cursor = pane.session.cursor();
+            let overlay_metrics = OverlayMetrics::from_atlas(
+                &self.atlas,
+                (self.viewport.0 as f32, self.viewport.1 as f32),
+            );
+            let origin = (
+                (pane.rect.col + cursor.column) as f32 * metrics.width as f32,
+                (pane.rect.row + cursor.line) as f32 * metrics.height as f32,
+            );
+            let mut buffers = std::mem::take(self.renderer.buffers());
+            let width = layout_text(
+                &mut self.atlas,
+                &self.composition,
+                origin,
+                self.display_material.role(Role::Foreground),
+                1.0,
+                overlay_metrics,
+                Style::REGULAR,
+                &mut buffers.ui_text,
+            );
+            buffers.quads.push(fill(
+                (origin.0, origin.1 + metrics.height as f32 - 2.0),
+                (width.max(metrics.width as f32), 2.0),
+                self.display_material.role(Role::Accent),
+                1.0,
+            ));
+            *self.renderer.buffers() = buffers;
+        }
 
         // The overlay last, so its quads land over the grid.
         if self.find.is_open() {
@@ -1398,6 +1594,41 @@ impl Surface {
         self.layout.at(self.area(), (x / w) as u16, (y / h) as u16)
     }
 
+    fn point_in_pane(&self, pane: PaneId, x: f32, y: f32) -> Option<Point> {
+        let rect = self.panes.iter().find(|candidate| candidate.id == pane)?.rect;
+        let (w, h) = (self.cell_width_points(), self.cell_height_points());
+        if w <= 0.0 || h <= 0.0 || x < 0.0 || y < 0.0 {
+            return None;
+        }
+        let column = (x / w) as u16;
+        let row = (y / h) as u16;
+        if column < rect.col
+            || column >= rect.col.saturating_add(rect.cols)
+            || row < rect.row
+            || row >= rect.row.saturating_add(rect.rows)
+        {
+            return None;
+        }
+        Some(Point::new(
+            i32::from(row - rect.row),
+            column - rect.col,
+        ))
+    }
+
+    fn clamped_point_in_pane(&self, pane: PaneId, x: f32, y: f32) -> Option<Point> {
+        let rect = self.panes.iter().find(|candidate| candidate.id == pane)?.rect;
+        let (w, h) = (self.cell_width_points(), self.cell_height_points());
+        if w <= 0.0 || h <= 0.0 || rect.cols == 0 || rect.rows == 0 {
+            return None;
+        }
+        let column = (x / w).floor() as i32 - i32::from(rect.col);
+        let row = (y / h).floor() as i32 - i32::from(rect.row);
+        Some(Point::new(
+            row.clamp(0, i32::from(rect.rows - 1)),
+            column.clamp(0, i32::from(rect.cols - 1)) as u16,
+        ))
+    }
+
     /// Focuses whatever pane is under the pointer. Returns whether focus moved.
     pub fn focus_pane_at(&mut self, x: f32, y: f32) -> bool {
         let Some(id) = self.pane_at(x, y) else { return false };
@@ -1405,6 +1636,63 @@ impl Surface {
             return false;
         }
         self.set_focus(id);
+        true
+    }
+
+    pub fn mouse_reporting_at(&self, x: f32, y: f32) -> bool {
+        let Some(id) = self.pane_at(x, y) else { return false };
+        self.panes
+            .iter()
+            .find(|pane| pane.id == id)
+            .is_some_and(|pane| pane.session.modes().mouse_reporting)
+    }
+
+    /// Sends one pointer event to the child that owns the pane under the
+    /// initial press. Shift is handled by the view as the conventional escape
+    /// hatch for selecting text inside a mouse-aware TUI.
+    pub fn report_mouse(
+        &mut self,
+        x: f32,
+        y: f32,
+        button: Option<MouseButton>,
+        action: MouseAction,
+        modifiers: u8,
+    ) -> bool {
+        let hovered = self.pane_at(x, y);
+        let id = match (action, button) {
+            (MouseAction::Motion, None)
+            | (
+                MouseAction::Press,
+                Some(MouseButton::WheelUp | MouseButton::WheelDown),
+            ) => {
+                let Some(id) = hovered else { return false };
+                id
+            }
+            (MouseAction::Press, _) => {
+                let Some(id) = hovered else { return false };
+                self.set_focus(id);
+                id
+            }
+            _ => self.focus,
+        };
+        let Some(point) = self.clamped_point_in_pane(id, x, y) else { return false };
+        let Some(index) = self.panes.iter().position(|pane| pane.id == id) else { return false };
+        let modes = self.panes[index].session.modes();
+        let permitted = match action {
+            MouseAction::Press | MouseAction::Release => modes.mouse_tracking != MouseTracking::Off,
+            MouseAction::Motion => {
+                modes.mouse_tracking == MouseTracking::Motion
+                    || (modes.mouse_tracking == MouseTracking::Drag && button.is_some())
+            }
+        };
+        if !permitted {
+            return false;
+        }
+        let Some(bytes) = mouse_payload(point, button, action, modifiers, modes.mouse_encoding)
+        else {
+            return false;
+        };
+        let _ = self.panes[index].session.write_input(&bytes);
         true
     }
 
@@ -1446,6 +1734,110 @@ impl Surface {
     pub fn cursor_shape(&self) -> CursorShape {
         self.sess().cursor().shape
     }
+}
+
+fn selection_instances(
+    selection: Selection,
+    rect: CellRect,
+    color: Rgba,
+    out: &mut Vec<BgInstance>,
+) {
+    if rect.cols == 0 || rect.rows == 0 {
+        return;
+    }
+    let (start, end) = if selection.start <= selection.end {
+        (selection.start, selection.end)
+    } else {
+        (selection.end, selection.start)
+    };
+    let first_row = start.line.max(0);
+    let last_row = end.line.min(i32::from(rect.rows) - 1);
+    if first_row > last_row {
+        return;
+    }
+
+    let last_column = rect.cols - 1;
+    let (block_start, block_end) = if start.column <= end.column {
+        (start.column, end.column)
+    } else {
+        (end.column, start.column)
+    };
+    for line in first_row..=last_row {
+        let (first, last) = if selection.kind == SelectionKind::Block {
+            (block_start, block_end)
+        } else {
+            (
+                if line == start.line { start.column } else { 0 },
+                if line == end.line { end.column } else { last_column },
+            )
+        };
+        let first = first.min(last_column);
+        let last = last.min(last_column);
+        if first > last {
+            continue;
+        }
+        out.push(BgInstance::new(
+            rect.col.saturating_add(first),
+            rect.row.saturating_add(line as u16),
+            last - first + 1,
+            color,
+        ));
+    }
+}
+
+fn paste_payload(text: &str, bracketed: bool) -> Vec<u8> {
+    if !bracketed {
+        return text.as_bytes().to_vec();
+    }
+    let mut bytes = Vec::with_capacity(text.len() + 12);
+    bytes.extend_from_slice(b"\x1b[200~");
+    bytes.extend_from_slice(text.as_bytes());
+    bytes.extend_from_slice(b"\x1b[201~");
+    bytes
+}
+
+fn mouse_payload(
+    point: Point,
+    button: Option<MouseButton>,
+    action: MouseAction,
+    modifiers: u8,
+    encoding: MouseEncoding,
+) -> Option<Vec<u8>> {
+    let base = match button {
+        Some(MouseButton::Left) => 0,
+        Some(MouseButton::Middle) => 1,
+        Some(MouseButton::Right) => 2,
+        Some(MouseButton::WheelUp) => 64,
+        Some(MouseButton::WheelDown) => 65,
+        None => 3,
+    };
+    let code = base
+        + (modifiers & (4 | 8 | 16))
+        + if action == MouseAction::Motion { 32 } else { 0 };
+    let column = u32::from(point.column) + 1;
+    let row = u32::try_from(point.line).ok()?.saturating_add(1);
+
+    if encoding == MouseEncoding::Sgr {
+        let suffix = if action == MouseAction::Release { 'm' } else { 'M' };
+        return Some(format!("\x1b[<{code};{column};{row}{suffix}").into_bytes());
+    }
+
+    let code = if action == MouseAction::Release {
+        3 + (modifiers & (4 | 8 | 16))
+    } else {
+        code
+    };
+    let mut bytes = b"\x1b[M".to_vec();
+    for value in [u32::from(code) + 32, column + 32, row + 32] {
+        if encoding == MouseEncoding::Utf8 {
+            let ch = char::from_u32(value)?;
+            let mut encoded = [0; 4];
+            bytes.extend_from_slice(ch.encode_utf8(&mut encoded).as_bytes());
+        } else {
+            bytes.push(u8::try_from(value).ok()?);
+        }
+    }
+    Some(bytes)
 }
 
 /// How many cells fit in a drawable.
@@ -1503,6 +1895,151 @@ mod tests {
         // A window dragged to nothing must still have a grid.
         assert_eq!(grid_size((0, 0), 10, 20), (1, 1));
         assert_eq!(grid_size((5, 5), 10, 20), (1, 1));
+    }
+
+    #[test]
+    fn paste_is_raw_until_the_child_enables_bracketed_mode() {
+        assert_eq!(paste_payload("one\ntwo", false), b"one\ntwo");
+    }
+
+    #[test]
+    fn paste_is_delimited_after_the_child_enables_bracketed_mode() {
+        assert_eq!(paste_payload("one\ntwo", true), b"\x1b[200~one\ntwo\x1b[201~");
+    }
+
+    #[test]
+    fn linear_selection_emits_one_clipped_rectangle_per_visible_row() {
+        let mut out = Vec::new();
+        selection_instances(
+            Selection {
+                start: Point::new(-2, 7),
+                end: Point::new(1, 3),
+                kind: SelectionKind::Simple,
+            },
+            CellRect::new(5, 9, 10, 4),
+            Rgba([1, 2, 3, 4]),
+            &mut out,
+        );
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].cell, [5, 9]);
+        assert_eq!(out[0].width, 10);
+        assert_eq!(out[1].cell, [5, 10]);
+        assert_eq!(out[1].width, 4);
+    }
+
+    #[test]
+    fn block_selection_keeps_the_same_columns_on_every_row() {
+        let mut out = Vec::new();
+        selection_instances(
+            Selection {
+                start: Point::new(0, 6),
+                end: Point::new(2, 2),
+                kind: SelectionKind::Block,
+            },
+            CellRect::new(4, 8, 12, 5),
+            Rgba([1, 2, 3, 4]),
+            &mut out,
+        );
+        assert_eq!(out.len(), 3);
+        assert!(out.iter().all(|instance| instance.cell[0] == 6));
+        assert!(out.iter().all(|instance| instance.width == 5));
+    }
+
+    #[test]
+    fn sgr_mouse_reports_one_based_cells_and_release_suffix() {
+        assert_eq!(
+            mouse_payload(
+                Point::new(0, 0),
+                Some(MouseButton::Left),
+                MouseAction::Press,
+                0,
+                MouseEncoding::Sgr,
+            )
+            .unwrap(),
+            b"\x1b[<0;1;1M"
+        );
+        assert_eq!(
+            mouse_payload(
+                Point::new(4, 8),
+                Some(MouseButton::Right),
+                MouseAction::Release,
+                16,
+                MouseEncoding::Sgr,
+            )
+            .unwrap(),
+            b"\x1b[<18;9;5m"
+        );
+    }
+
+    #[test]
+    fn legacy_mouse_uses_x10_bytes() {
+        assert_eq!(
+            mouse_payload(
+                Point::new(0, 0),
+                Some(MouseButton::Left),
+                MouseAction::Press,
+                0,
+                MouseEncoding::Legacy,
+            )
+            .unwrap(),
+            b"\x1b[M !!"
+        );
+    }
+
+    #[test]
+    fn ime_composition_is_drawn_as_transient_text_with_an_underline() {
+        let mut s = surface("ime-composition");
+        s.set_composition("compose");
+        s.build_frame();
+        assert!(!s.renderer.buffers().ui_text.is_empty());
+        assert!(!s.renderer.buffers().quads.is_empty());
+
+        s.set_composition("");
+        s.build_frame();
+        assert!(s.renderer.buffers().ui_text.is_empty());
+    }
+
+    #[test]
+    fn a_plain_click_focuses_without_leaving_one_character_selected() {
+        let mut s = surface("plain-click");
+        let x = s.cell_width_points() * 0.5;
+        let y = s.cell_height_points() * 0.5;
+        assert!(s.begin_selection(x, y, SelectionKind::Simple));
+        assert_eq!(s.finish_selection(), None);
+        assert!(s.session().selection().is_none());
+    }
+
+    #[test]
+    fn selection_highlight_reaches_the_offscreen_framebuffer() {
+        let mut s = surface("selection-pixels");
+        let target = s.renderer().context().offscreen_target(800, 480).unwrap();
+        s.render_to_texture(&target).unwrap();
+        let before = mica_gpu::renderer::read_back(&target);
+
+        let cell_width = s.cell_width_points();
+        let cell_height = s.cell_height_points();
+        assert!(s.begin_selection(
+            cell_width * 3.2,
+            cell_height * 3.2,
+            SelectionKind::Simple,
+        ));
+        assert!(s.update_selection(cell_width * 4.2, cell_height * 3.2));
+        s.render_to_texture(&target).unwrap();
+        let after = mica_gpu::renderer::read_back(&target);
+
+        let metrics = s.atlas.metrics();
+        let x = metrics.width as usize * 3 + metrics.width as usize / 2;
+        let y = metrics.height as usize * 3 + metrics.height as usize / 2;
+        let before_pixel = mica_gpu::renderer::pixel_at(&before, 800, x, y);
+        let after_pixel = mica_gpu::renderer::pixel_at(&after, 800, x, y);
+        assert_ne!(before_pixel, after_pixel, "selection produced no visible highlight");
+
+        let untouched_x = metrics.width as usize * 10 + metrics.width as usize / 2;
+        assert_eq!(
+            mica_gpu::renderer::pixel_at(&before, 800, untouched_x, y),
+            mica_gpu::renderer::pixel_at(&after, 800, untouched_x, y),
+            "selection changed an unrelated cell",
+        );
     }
 
     #[test]

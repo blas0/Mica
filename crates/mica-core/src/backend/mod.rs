@@ -90,18 +90,42 @@ impl Default for CursorState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionKind {
+    Simple,
+    Block,
+    Semantic,
+    Lines,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Selection {
     pub start: Point,
     pub end: Point,
-    pub rectangular: bool,
+    pub kind: SelectionKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MouseTracking {
+    #[default]
+    Off,
+    Click,
+    Drag,
+    Motion,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MouseEncoding {
+    #[default]
+    Legacy,
+    Utf8,
+    Sgr,
 }
 
 /// DEC private modes the *window* layer has to know about.
 ///
-/// Deliberately three booleans rather than a handle to the backend's own mode
-/// set: the window layer needs to answer two questions — "is a full-screen
-/// program on screen?" and "how does it spell an arrow key?" — and giving it
-/// anything more would let terminal-emulator detail leak into AppKit code.
+/// Deliberately plain booleans rather than a handle to the backend's own mode
+/// set: the window layer gets only the negotiated behavior it must honor, and
+/// terminal-emulator detail does not leak into AppKit code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct TerminalModes {
     /// DECSET 1049. A full-screen program owns the screen; there is no
@@ -114,6 +138,13 @@ pub struct TerminalModes {
     /// pointer itself, so the terminal must not invent keystrokes on its
     /// behalf.
     pub mouse_reporting: bool,
+    pub mouse_tracking: MouseTracking,
+    pub mouse_encoding: MouseEncoding,
+    /// DECSET 1004. Send CSI I/O as the terminal gains or loses focus.
+    pub focus_reporting: bool,
+    /// DECSET 2004. Paste delimiters are protocol bytes, not decoration, and
+    /// must only be sent after the child has asked for them.
+    pub bracketed_paste: bool,
 }
 
 /// What a renderer needs from a terminal, and nothing more.
@@ -161,6 +192,13 @@ pub trait TerminalCore: Sized {
 
     /// Text of the current selection, for the clipboard.
     fn selection_text(&self) -> Option<String>;
+
+    /// OSC 8 target under one visible cell, for explicit user activation.
+    fn hyperlink_at(&self, point: Point) -> Option<String>;
+
+    /// Visible text for an on-demand accessibility query. This is not a
+    /// rendering seam and must never be called from the frame loop.
+    fn visible_text(&self) -> String;
 
     /// OSC 133 / OSC 7 / OSC 9 events since the last drain.
     fn drain_semantic_events(&mut self) -> Vec<SemanticEvent>;

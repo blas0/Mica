@@ -250,6 +250,40 @@ fn osc7_is_reported_as_a_working_directory_change() {
 }
 
 #[test]
+fn clipboard_bell_and_notifications_leave_the_backend_as_events() {
+    let mut core = terminal(40, 10);
+    core.write(b"\x1b]52;c;Y29weSBtZQ==\x07");
+    core.write(b"\x07");
+    core.write(b"\x1b]777;notify;Build;finished\x07");
+    let events = core.drain_semantic_events();
+    assert!(events.contains(&SemanticEvent::ClipboardWrite("copy me".into())));
+    assert!(events.contains(&SemanticEvent::Bell));
+    assert!(events.contains(&SemanticEvent::Notification {
+        title: Some("Build".into()),
+        body: "finished".into(),
+    }));
+}
+
+#[test]
+fn osc8_hyperlinks_can_be_resolved_at_a_visible_cell() {
+    use mica_core::backend::Point;
+    let mut core = terminal(40, 10);
+    core.write(b"\x1b]8;;https://example.com/docs\x07link\x1b]8;;\x07");
+    assert_eq!(
+        core.hyperlink_at(Point::new(0, 0)).as_deref(),
+        Some("https://example.com/docs")
+    );
+    assert_eq!(core.hyperlink_at(Point::new(0, 4)), None);
+}
+
+#[test]
+fn visible_text_is_available_for_on_demand_accessibility() {
+    let mut core = terminal(20, 3);
+    core.write(b"accessible");
+    assert!(core.visible_text().contains("accessible"));
+}
+
+#[test]
 fn a_title_change_is_reported_once() {
     let mut core = terminal(40, 10);
     core.write(b"\x1b]0;mica\x07");
@@ -294,15 +328,61 @@ fn row_text_all(core: &mut Backend) -> Vec<String> {
 
 #[test]
 fn selected_text_can_be_read_back() {
-    use mica_core::backend::{Point, Selection};
+    use mica_core::backend::{Point, Selection, SelectionKind};
     let mut core = terminal(20, 5);
     core.write(b"copy me");
     core.set_selection(Some(Selection {
         start: Point::new(0, 0),
         end: Point::new(0, 6),
-        rectangular: false,
+        kind: SelectionKind::Simple,
     }));
     assert_eq!(core.selection_text().as_deref(), Some("copy me"));
     core.set_selection(None);
     assert!(core.selection().is_none());
+}
+
+#[test]
+fn selection_can_span_the_complete_retained_buffer() {
+    use mica_core::backend::{Point, Selection, SelectionKind};
+    let mut core = terminal(8, 2);
+    core.write(b"first\r\nsecond\r\nthird");
+    core.set_selection(Some(Selection {
+        start: Point::new(i32::MIN, 0),
+        end: Point::new(i32::MAX, u16::MAX),
+        kind: SelectionKind::Simple,
+    }));
+    let text = core.selection_text().unwrap();
+    assert!(text.contains("first"), "oldest line was omitted: {text:?}");
+    assert!(text.contains("third"), "newest line was omitted: {text:?}");
+}
+
+#[test]
+fn bracketed_paste_mode_tracks_what_the_child_requested() {
+    let mut core = terminal(20, 5);
+    assert!(!core.modes().bracketed_paste);
+
+    core.write(b"\x1b[?2004h");
+    assert!(core.modes().bracketed_paste);
+
+    core.write(b"\x1b[?2004l");
+    assert!(!core.modes().bracketed_paste);
+}
+
+#[test]
+fn mouse_and_focus_modes_track_the_child_protocol() {
+    use mica_core::backend::{MouseEncoding, MouseTracking};
+    let mut core = terminal(20, 5);
+    assert_eq!(core.modes().mouse_tracking, MouseTracking::Off);
+    assert!(!core.modes().focus_reporting);
+
+    core.write(b"\x1b[?1002h\x1b[?1006h\x1b[?1004h");
+    let modes = core.modes();
+    assert!(modes.mouse_reporting);
+    assert_eq!(modes.mouse_tracking, MouseTracking::Drag);
+    assert_eq!(modes.mouse_encoding, MouseEncoding::Sgr);
+    assert!(modes.focus_reporting);
+
+    core.write(b"\x1b[?1002l\x1b[?1006l\x1b[?1004l");
+    assert_eq!(core.modes().mouse_tracking, MouseTracking::Off);
+    assert!(!core.modes().focus_reporting);
 }

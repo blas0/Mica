@@ -273,6 +273,14 @@ impl Session {
         self.core.selection_text()
     }
 
+    pub fn hyperlink_at(&self, point: crate::backend::Point) -> Option<String> {
+        self.core.hyperlink_at(point)
+    }
+
+    pub fn visible_text(&self) -> String {
+        self.core.visible_text()
+    }
+
     pub fn side_tables(&self) -> &SideTables {
         self.core.side_tables()
     }

@@ -19,7 +19,7 @@ mica-core.workspace = true
 mica-atlas.workspace = true
 mica-gpu.workspace = true
 objc2.workspace = true
-objc2-foundation = { workspace = true, features = ["NSString", "NSGeometry", "NSNotification", "NSThread", "NSObjCRuntime"] }
+objc2-foundation = { workspace = true, features = ["NSArray", "NSAttributedString", "NSString", "NSURL", "NSGeometry", "NSNotification", "NSUserNotification", "NSThread", "NSObjCRuntime"] }
 objc2-app-kit = { workspace = true, features = [
     "NSApplication", "NSWindow", "NSView", "NSResponder", "NSEvent", "NSMenu",
     "NSMenuItem", "NSRunningApplication", "NSGraphics", "NSScreen", "NSPasteboard",
