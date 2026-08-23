@@ -1,8 +1,11 @@
-//! Find in scrollback, and the fuzzy matcher the palette uses.
+//! Find in scrollback.
 //!
-//! Both are pure functions over text, which is why they live together and why
-//! neither needs a GPU to test. The *highlighting* is a render concern — matches
-//! become quads, never mutated cells — but deciding what matches is not.
+//! A pure function over text, which is why it needs no GPU to test. The
+//! *highlighting* is a render concern — matches become quads, never mutated
+//! cells — but deciding what matches is not.
+//!
+//! There used to be a fuzzy matcher here too, ranking command-palette entries.
+//! The palette is gone; so is it.
 //!
 //! ## Literal, not regex
 //!
@@ -191,133 +194,6 @@ fn find_in_line(
     }
 }
 
-// --- fuzzy matching, for the palette ----------------------------------------
-
-/// How well a candidate matched, higher is better.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FuzzyMatch {
-    pub score: i32,
-    /// Character indices in the candidate that matched, for highlighting.
-    pub positions: Vec<u16>,
-}
-
-/// A match at the start of the string or just after a separator. This is what
-/// the user was almost certainly abbreviating.
-const BOUNDARY_BONUS: i32 = 16;
-/// Characters matched back to back mean a real prefix rather than letters found
-/// scattered across the string.
-const CONSECUTIVE_BONUS: i32 = 8;
-const ORDINARY: i32 = 1;
-const EXACT_CASE: i32 = 1;
-
-fn boundary(haystack: &[char], index: usize) -> bool {
-    index == 0 || matches!(haystack[index - 1], '.' | '_' | '-' | ' ' | '/')
-}
-
-fn position_bonus(haystack: &[char], index: usize, want: char) -> i32 {
-    let base = if boundary(haystack, index) { BOUNDARY_BONUS } else { ORDINARY };
-    base + if haystack[index] == want { EXACT_CASE } else { 0 }
-}
-
-/// Subsequence match with a score that favours the things people actually mean.
-///
-/// The scoring is where a palette is won or lost: `sn` must rank
-/// `session.next_tab` above `session.previous_tab`, and `set` must rank
-/// `settings.open` above both.
-///
-/// **This is a search, not a greedy scan.** Taking the first occurrence of each
-/// query character is the obvious implementation and it is wrong: in
-/// `session.next_tab` the first `n` is the one inside `session`, so `sn` would
-/// score as two letters found mid-word rather than as the abbreviation it
-/// obviously is. The table below considers every placement and keeps the best,
-/// which costs `query × candidate` steps — a few hundred, for strings this size.
-pub fn fuzzy_match(query: &str, candidate: &str) -> Option<FuzzyMatch> {
-    if query.is_empty() {
-        return Some(FuzzyMatch { score: 0, positions: Vec::new() });
-    }
-    let haystack: Vec<char> = candidate.chars().collect();
-    let needle: Vec<char> = query.chars().collect();
-    if needle.len() > haystack.len() {
-        return None;
-    }
-
-    // `best[i][j]` is the score of the best way to match `needle[..=i]` ending
-    // with `needle[i]` placed at `haystack[j]`; `from[i][j]` is the placement of
-    // `needle[i - 1]` that produced it.
-    let (n, m) = (needle.len(), haystack.len());
-    let mut best = vec![vec![i32::MIN; m]; n];
-    let mut from = vec![vec![usize::MAX; m]; n];
-
-    for j in 0..m {
-        if haystack[j].to_lowercase().eq(needle[0].to_lowercase()) {
-            best[0][j] = position_bonus(&haystack, j, needle[0]);
-        }
-    }
-
-    for i in 1..n {
-        for j in i..m {
-            if !haystack[j].to_lowercase().eq(needle[i].to_lowercase()) {
-                continue;
-            }
-            for k in (i - 1)..j {
-                if best[i - 1][k] == i32::MIN {
-                    continue;
-                }
-                let gap = (j - k - 1) as i32;
-                let bonus = if gap == 0 {
-                    // Adjacent: take whichever signal is stronger rather than
-                    // adding them, so a boundary match is not double-counted.
-                    position_bonus(&haystack, j, needle[i]).max(CONSECUTIVE_BONUS)
-                } else {
-                    // Scattered letters are worth less the further apart they
-                    // are. Without this, `set` matches the `t` of `_tab` in
-                    // `session.previous_tab` and outranks `settings.open`.
-                    position_bonus(&haystack, j, needle[i]) - gap
-                };
-                let candidate_score = best[i - 1][k] + bonus;
-                if candidate_score > best[i][j] {
-                    best[i][j] = candidate_score;
-                    from[i][j] = k;
-                }
-            }
-        }
-    }
-
-    let (end, score) = (0..m)
-        .filter(|&j| best[n - 1][j] != i32::MIN)
-        .map(|j| (j, best[n - 1][j]))
-        .max_by_key(|&(_, s)| s)?;
-
-    let mut positions = vec![0u16; n];
-    let mut j = end;
-    for i in (0..n).rev() {
-        positions[i] = j as u16;
-        if i > 0 {
-            j = from[i][j];
-        }
-    }
-
-    // Shorter candidates win ties: with `set` typed, `settings.open` should
-    // beat `settings.fx.cursor`.
-    Some(FuzzyMatch { score: score - (m as i32) / 8, positions })
-}
-
-/// Ranks candidates, dropping the ones that do not match at all.
-pub fn rank<'a, T, F>(query: &str, candidates: &'a [T], key: F) -> Vec<(&'a T, FuzzyMatch)>
-where
-    F: Fn(&T) -> &str,
-{
-    let mut ranked: Vec<(&T, FuzzyMatch)> = candidates
-        .iter()
-        .filter_map(|c| fuzzy_match(query, key(c)).map(|m| (c, m)))
-        .collect();
-    // Stable sort on score keeps the declared order as the tiebreak, so an
-    // empty query shows the actions in the order they were written rather than
-    // in hash order.
-    ranked.sort_by(|a, b| b.1.score.cmp(&a.1.score));
-    ranked
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -419,84 +295,5 @@ mod tests {
         assert!(s.is_empty());
         assert_eq!(s.query(), "");
         assert_eq!(s.position(), None);
-    }
-
-    // --- fuzzy ------------------------------------------------------------
-
-    const ACTIONS: &[&str] = &[
-        "session.next_tab",
-        "session.previous_tab",
-        "session.scroll_bottom",
-        "session.clear_selection",
-        "blocks.next",
-        "blocks.previous",
-        "blocks.fold",
-        "settings.open",
-        "settings.fx.cursor",
-        "settings.fx.decay",
-        "settings.fx.blocks",
-        "settings.fx.depth",
-    ];
-
-    fn best(query: &str) -> &'static str {
-        rank(query, ACTIONS, |a| *a).first().map(|(a, _)| **a).expect("no match")
-    }
-
-    #[test]
-    fn a_subsequence_matches_and_a_non_subsequence_does_not() {
-        assert!(fuzzy_match("snt", "session.next_tab").is_some());
-        assert!(fuzzy_match("zzz", "session.next_tab").is_none());
-    }
-
-    #[test]
-    fn an_empty_query_matches_everything_so_the_palette_opens_full() {
-        assert_eq!(rank("", ACTIONS, |a| *a).len(), ACTIONS.len());
-    }
-
-    #[test]
-    fn word_boundary_matches_outrank_matches_inside_words() {
-        // The whole reason the palette feels right: `sn` is an abbreviation of
-        // the two words, not two letters found somewhere in the string.
-        assert_eq!(best("snt"), "session.next_tab");
-        assert_eq!(best("bn"), "blocks.next");
-        assert_eq!(best("so"), "settings.open");
-    }
-
-    #[test]
-    fn a_full_prefix_wins() {
-        assert_eq!(best("settings.open"), "settings.open");
-        assert_eq!(best("blocks.fold"), "blocks.fold");
-    }
-
-    #[test]
-    fn shorter_candidates_win_ties() {
-        // With `set` typed, the shortest settings action should lead.
-        assert_eq!(best("set"), "settings.open");
-    }
-
-    #[test]
-    fn matched_positions_are_reported_for_highlighting() {
-        let m = fuzzy_match("sn", "session.next_tab").unwrap();
-        assert_eq!(m.positions, vec![0, 8]);
-        assert_eq!(
-            "session.next_tab".chars().nth(8),
-            Some('n'),
-            "position 8 should be the `n` of `next`"
-        );
-    }
-
-    #[test]
-    fn ranking_is_stable_for_equal_scores() {
-        // An empty query must show the actions in the order they were declared
-        // rather than in an arbitrary one.
-        let ranked = rank("", ACTIONS, |a| *a);
-        let names: Vec<&str> = ranked.iter().map(|(a, _)| **a).collect();
-        assert_eq!(names, ACTIONS);
-    }
-
-    #[test]
-    fn matching_is_case_insensitive() {
-        assert!(fuzzy_match("SNT", "session.next_tab").is_some());
-        assert!(fuzzy_match("snt", "SESSION.NEXT_TAB").is_some());
     }
 }

@@ -32,7 +32,7 @@ use crate::settings::{AmbientSettings, Settings, SettingsError};
 pub struct KeyDoc {
     /// `namespace.verb` — the key written in `[keys]`.
     pub action: String,
-    /// What a person reads in the palette.
+    /// What a person reads beside the action in the catalogue.
     pub label: String,
     /// The chord bound to it right now, in config spelling. Empty when the
     /// action is deliberately unbound.
@@ -208,9 +208,9 @@ mod tests {
     fn keys() -> Vec<KeyDoc> {
         vec![
             KeyDoc {
-                action: "palette.toggle".into(),
-                label: "Command Palette".into(),
-                chord: "f5".into(),
+                action: "find.toggle".into(),
+                label: "Find in Scrollback".into(),
+                chord: "cmd+f".into(),
                 implemented: true,
             },
             KeyDoc {
@@ -399,7 +399,7 @@ mod tests {
         assert!(line.contains("not implemented"), "{line}");
         let live = text
             .lines()
-            .find(|l| l.contains("palette.toggle"))
+            .find(|l| l.contains("find.toggle"))
             .expect("the action is missing from the catalogue");
         assert!(!live.contains("not implemented"), "{live}");
     }

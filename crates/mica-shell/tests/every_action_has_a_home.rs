@@ -2,7 +2,7 @@
 //!
 //! An action can be answered in one of two places: `Surface::dispatch`, which
 //! is the terminal, or `MicaView::window_action`, which is the window. The
-//! failure this prevents is a palette entry that looks live, is bound to a
+//! failure this prevents is a catalogue entry that looks live, is bound to a
 //! chord, appears in the settings catalogue without the "not implemented yet"
 //! note — and does nothing when you pick it.
 //!

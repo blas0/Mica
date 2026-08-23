@@ -1,14 +1,12 @@
 //! What each key combination does, and how the user changes it.
 //!
-//! Before this, the three shortcuts Mica owned were a `match` on characters
-//! inside `keyDown:`. That is fine until the command palette starts printing an
-//! accelerator next to every action — at which point the printed accelerator
-//! and the `match` are two copies of the same fact, and they drift. Mica's
-//! palette was already advertising `⌘↓` for "Scroll to Bottom" and `⌘↑` for
-//! block navigation, none of which existed.
+//! Before this, the shortcuts Mica owned were a `match` on characters inside
+//! `keyDown:`, and every place that *wrote a shortcut down* was a second copy
+//! of the same fact. They drifted: the app advertised `⌘↓` for two different
+//! actions and `⌘↑` for one that had no binding at all.
 //!
-//! So there is one table. The window dispatches through it, the palette prints
-//! from it, and the shortcut panel edits it.
+//! So there is one table. The window dispatches through it, the settings file
+//! is generated from it, and `[keys]` is the only thing that edits it.
 //!
 //! ## Storage
 //!
@@ -31,8 +29,7 @@
 //! "text:clear && ls -la\n" = "cmd+shift+l"
 //! ```
 //!
-//! See [`text_payload`]. It is a file-only feature — the shortcut panel edits
-//! the fixed catalogue below and has no field for an arbitrary string.
+//! See [`text_payload`].
 
 use std::collections::BTreeMap;
 
@@ -46,7 +43,7 @@ use crate::keys::{Key, Modifiers};
 /// same binding written in a settings file says `p`. Case belongs to Shift,
 /// which is already in the modifiers; carrying it in the character as well
 /// gives one chord two spellings, and a table keyed on it misses half the
-/// time. It did: the command palette stopped opening.
+/// time. It did: shifted bindings simply stopped firing.
 ///
 /// Folding in the constructor rather than at each lookup is the difference
 /// between a rule and a habit — there is no way to build an unfolded chord.
@@ -139,26 +136,6 @@ impl Chord {
         }
         Some(Chord::new(modifiers, key?))
     }
-
-    /// The form shown in the palette and the shortcut panel, using the symbols
-    /// every Mac menu uses. Order is Apple's: control, option, shift, command.
-    pub fn to_display(self) -> String {
-        let mut out = String::new();
-        if self.modifiers.control {
-            out.push('⌃');
-        }
-        if self.modifiers.alt {
-            out.push('⌥');
-        }
-        if self.modifiers.shift {
-            out.push('⇧');
-        }
-        if self.modifiers.command {
-            out.push('⌘');
-        }
-        out.push_str(&key_display_name(self.key));
-        out
-    }
 }
 
 /// The bytes a `text:` binding sends, if that is what this action is.
@@ -205,26 +182,6 @@ fn key_config_name(key: Key) -> String {
     }
 }
 
-fn key_display_name(key: Key) -> String {
-    match key {
-        Key::Char(ch) => ch.to_uppercase().to_string(),
-        Key::Enter => "↩".into(),
-        Key::Tab => "⇥".into(),
-        Key::Backspace => "⌫".into(),
-        Key::Delete => "⌦".into(),
-        Key::Escape => "⎋".into(),
-        Key::Up => "↑".into(),
-        Key::Down => "↓".into(),
-        Key::Left => "←".into(),
-        Key::Right => "→".into(),
-        Key::Home => "↖".into(),
-        Key::End => "↘".into(),
-        Key::PageUp => "⇞".into(),
-        Key::PageDown => "⇟".into(),
-        Key::Insert => "Ins".into(),
-        Key::Function(n) => format!("F{n}"),
-    }
-}
 
 fn parse_key_name(name: &str) -> Option<Key> {
     Some(match name {
@@ -266,10 +223,10 @@ fn parse_key_name(name: &str) -> Option<Key> {
 /// One thing a key can be bound to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Bindable {
-    /// The action id, shared with the command palette.
+    /// The action id, as `[keys]` spells it.
     pub id: &'static str,
     pub label: &'static str,
-    /// False for actions that exist as a binding and a palette entry but do
+    /// False for actions that exist as a binding but do
     /// nothing yet — tabs and panes, which Mica does not have.
     ///
     /// Recorded rather than omitted so the settings catalogue can say so out
@@ -277,16 +234,14 @@ pub struct Bindable {
     pub implemented: bool,
 }
 
-/// Every action the shortcut panel offers, in the order it lists them.
+/// Every action a chord can be bound to, in the order the catalogue lists them.
 ///
-/// A fixed list rather than everything the palette can dispatch: the palette
-/// includes one entry per theme, and a shortcut panel with twenty-two "Theme ·
-/// …" rows in it is a worse panel.
+/// Themes are deliberately not in it. There are twenty-two, they are chosen by
+/// name in `[appearance]`, and twenty-two more bindable actions would bury the
+/// dozen that are about what the terminal *does*.
 pub const BINDABLE: &[Bindable] = &[
-    Bindable { id: "palette.toggle", label: "Command Palette", implemented: true },
     Bindable { id: "settings.open", label: "Settings", implemented: true },
     Bindable { id: "settings.reload", label: "Reload Settings", implemented: true },
-    Bindable { id: "keys.open", label: "Keyboard Shortcuts", implemented: true },
     Bindable { id: "find.toggle", label: "Find in Scrollback", implemented: true },
     Bindable { id: "find.next", label: "Next Match", implemented: true },
     Bindable { id: "find.previous", label: "Previous Match", implemented: true },
@@ -347,18 +302,13 @@ impl Bindings {
         let ctrl = Modifiers { control: true, ..Modifiers::NONE };
         let ctrl_shift = Modifiers { control: true, shift: true, ..Modifiers::NONE };
 
-        // `F5` opens the palette and `⌘,` opens the settings file, which is
-        // the split the two things actually have: one is a list of commands,
-        // the other is a document. On a Mac with "use F1, F2 … as standard
-        // function keys" off, that is `fn-F5`. It costs the shell its `F5`
-        // (`CSI 15~`); unbind it in `[keys]` if a program needs it.
-        bind(Modifiers::NONE, Key::Function(5), "palette.toggle");
+        // `⌘,` is Settings on a Mac, and Mica's settings are a file — so it
+        // opens the file. There is no second surface to keep in step with it.
         bind(cmd, Key::Char(','), "settings.open");
         // One modifier apart from the key that opens the file, because they
         // are the two halves of one loop: edit it, then apply it. `⌘,` then
         // `R` would need a prefix mode, and nothing else in Mica wants one.
         bind(cmd_shift, Key::Char(','), "settings.reload");
-        bind(cmd_shift, Key::Char('k'), "keys.open");
         bind(cmd, Key::Char('f'), "find.toggle");
         bind(cmd, Key::Char('g'), "find.next");
         bind(cmd_shift, Key::Char('g'), "find.previous");
@@ -382,7 +332,7 @@ impl Bindings {
         // `exit`, or `^D` — and by this, which is deliberately not `⌘W`.
         bind(cmd_shift, Key::Char('w'), "pane.close");
         // `⌘]` and `⌘[` rather than the arrows: `⌘↓` is scroll-to-bottom, and
-        // the palette used to claim both for both.
+        // the app used to claim both for both.
         bind(cmd, Key::Char(']'), "blocks.next");
         bind(cmd, Key::Char('['), "blocks.previous");
         Bindings { map }
@@ -423,7 +373,7 @@ impl Bindings {
         displaced.filter(|d| d != id)
     }
 
-    /// Unbinds an action entirely. It stays reachable from the palette.
+    /// Unbinds an action entirely. Nothing else reaches it.
     pub fn clear(&mut self, id: &str) {
         self.map.retain(|_, action| action != id);
     }
@@ -434,7 +384,7 @@ impl Bindings {
         let mut out = BTreeMap::new();
         // Text bindings are not in `BINDABLE` — there is no fixed catalogue of
         // them — so they are collected from the map itself. Without this a save
-        // from the shortcut panel would quietly delete every one of them.
+        // from inside the app would quietly delete every one of them.
         for (chord, action) in &self.map {
             if text_payload(action).is_some() {
                 out.insert(action.clone(), chord.to_config());
@@ -546,7 +496,7 @@ mod tests {
 
     #[test]
     fn no_default_chord_is_claimed_by_two_actions() {
-        // The bug this whole table exists to prevent: the palette advertised
+        // The bug this whole table exists to prevent: the app advertised
         // `⌘↓` for both "Scroll to Bottom" and "Next Command Block".
         let bindings = Bindings::defaults();
         let mut seen = std::collections::HashSet::new();
@@ -556,7 +506,7 @@ mod tests {
                     seen.insert(chord),
                     "{} shares {} with another action",
                     bindable.id,
-                    chord.to_display()
+                    chord.to_config()
                 );
             }
         }
@@ -629,11 +579,16 @@ mod tests {
     }
 
     #[test]
-    fn the_display_form_uses_the_symbols_a_mac_menu_uses() {
+    fn the_config_form_is_one_spelling_per_chord() {
+        // Modifier order in the file is the user's; the form Mica writes back
+        // is fixed, so two equal chords are the same string and the table can
+        // be keyed on it.
         let chord =
             Chord::new(Modifiers { command: true, shift: true, ..Modifiers::NONE }, Key::Char('p'));
-        assert_eq!(chord.to_display(), "⇧⌘P");
-        assert_eq!(Chord::new(cmd(), Key::Down).to_display(), "⌘↓");
+        assert_eq!(chord.to_config(), "shift+cmd+p");
+        assert_eq!(Chord::parse("cmd+shift+p"), Some(chord));
+        assert_eq!(Chord::parse("shift+cmd+p"), Some(chord));
+        assert_eq!(Chord::new(cmd(), Key::Down).to_config(), "cmd+down");
     }
 
     #[test]
@@ -722,14 +677,14 @@ mod tests {
     fn a_broken_entry_costs_only_itself() {
         let mut overrides = BTreeMap::new();
         overrides.insert("find.toggle".to_owned(), "cmd+j".to_owned());
-        overrides.insert("palette.toggle".to_owned(), "not a chord".to_owned());
+        overrides.insert("find.next".to_owned(), "not a chord".to_owned());
         overrides.insert("nonexistent.action".to_owned(), "cmd+k".to_owned());
 
         let bindings = Bindings::from_overrides(&overrides);
         assert_eq!(bindings.chord_for("find.toggle"), Some(Chord::new(cmd(), Key::Char('j'))));
         assert_eq!(
-            bindings.chord_for("palette.toggle"),
-            Bindings::defaults().chord_for("palette.toggle"),
+            bindings.chord_for("find.next"),
+            Bindings::defaults().chord_for("find.next"),
             "a typo in one binding cost the user another"
         );
         assert_eq!(bindings.action(Chord::new(cmd(), Key::Char('k'))), None);
@@ -795,7 +750,7 @@ mod tests {
     fn a_text_binding_survives_a_round_trip_through_the_overrides() {
         // `overrides()` walks BINDABLE, which a text binding is deliberately
         // not in. Without the extra pass it collects them by, saving from the
-        // shortcut panel would silently delete every one.
+        // inside the app would silently delete every one.
         let mut overrides = BTreeMap::new();
         overrides.insert("text:clear && ls -la\n".to_owned(), "cmd+shift+l".to_owned());
         let bindings = Bindings::from_overrides(&overrides);
@@ -815,10 +770,11 @@ mod tests {
     }
 
     #[test]
-    fn a_text_binding_is_not_offered_in_the_shortcut_panel() {
-        // The panel edits the fixed catalogue of actions Mica implements. A
-        // text binding is an unbounded string it has no field for, so it is a
-        // file-only feature and the catalogue must not grow a row for it.
+    fn a_text_binding_is_never_a_catalogue_entry() {
+        // BINDABLE is the fixed set of things Mica implements. A text binding
+        // is an unbounded string the user wrote, so it must never appear
+        // there — the settings writer collects those separately, and the
+        // commented catalogue explains the syntax without printing a payload.
         assert!(BINDABLE.iter().all(|b| text_payload(b.id).is_none()));
     }
 }
