@@ -224,16 +224,9 @@ define_class!(
 
             let decoded = decode(key_code, &characters, modifiers);
 
-            // The shortcut panel comes first and, while capturing, swallows
-            // everything — including ⎋ and the arrow keys, which is the only
-            // way those can be bound to anything.
+            // Bound chords first, so ⌘F still works while an overlay
+            // already has the keyboard.
             if let Some(key) = decoded {
-                if self.handle_shortcut_panel(key, modifiers) {
-                    self.redraw();
-                    return;
-                }
-                // Bound chords next, so ⌘F still works while an overlay
-                // already has the keyboard.
                 if self.handle_binding(key, modifiers) {
                     self.redraw();
                     return;
@@ -612,10 +605,10 @@ impl MicaView {
 
     /// Handles a chord that the binding table claims.
     ///
-    /// Was a `match` on characters, which meant the command palette's
-    /// accelerator column and the actual key handling were two copies of the
-    /// same fact. They had already drifted. Now there is one table, the
-    /// palette prints from it, and `⌘,` edits it.
+    /// Was a `match` on characters, which meant the key handling and every
+    /// place a shortcut was written down were separate copies of the same
+    /// fact, and they drifted. Now there is one table and `settings.toml`
+    /// is the only thing that edits it.
     fn handle_binding(&self, key: Key, modifiers: Modifiers) -> bool {
         let Some(surface) = self.ivars().surface.borrow_mut().as_mut().map(|s| s as *mut Surface)
         else {
@@ -676,17 +669,6 @@ impl MicaView {
         }
     }
 
-    /// Routes a key to the shortcut panel, if it is open.
-    fn handle_shortcut_panel(&self, key: Key, modifiers: Modifiers) -> bool {
-        let Some(surface) = self.ivars().surface.borrow_mut().as_mut().map(|s| s as *mut Surface)
-        else {
-            return false;
-        };
-        // SAFETY: as above.
-        let surface = unsafe { &mut *surface };
-        surface.shortcut_key(key, modifiers)
-    }
-
     /// Routes a key to an open overlay. Returns whether it was consumed.
     fn handle_overlay_key(
         &self,
@@ -731,8 +713,8 @@ impl MicaView {
             }
             _ => {
                 // Control combinations are not text; swallowing them silently
-                // would make Ctrl-C inside a palette do nothing at all rather
-                // than closing it.
+                // would make Ctrl-C inside the find bar do nothing at all
+                // rather than closing it.
                 if modifiers.control || modifiers.command {
                     if modifiers.control && characters.eq_ignore_ascii_case("c") {
                         surface.close_overlays();

@@ -96,9 +96,9 @@ change than the keystroke.
 
 ---
 
-## FU-2 · Palette, shortcut panel, settings file: what each is for
+## FU-2 · One configuration surface
 
-**Status: explained; nothing pruned; the boundary is now written down.**
+**Status: resolved by deletion. Both overlays are gone.**
 
 ### The question
 
@@ -106,36 +106,50 @@ change than the keystroke.
 > (cmd+shift+k) + settings.toml — it seems everything can be configured in
 > settings.toml, what do the other features serve?
 
-### The answer
+### The answer that was given first
 
-Nothing is redundant, but the boundary was never stated, which is why three
-surfaces read as three ways to do one thing. Each owns a different verb.
+Each owned a different verb: the file **recorded**, the panel **captured** a
+chord from the press, the palette **ran** one-shot actions. All true, and it did
+not survive contact with the person who has to use them. The question came back
+three times. When the boundary between three surfaces needs a table to explain,
+the boundary is the problem.
 
-| Surface | Verb | What only it can do |
-|---|---|---|
-| `settings.toml` (`⌘,`) | **record** | Persist, diff, commit, share. The only writer. |
-| Shortcut panel (`⌘⇧K`) | **capture** | Learn a chord from the *press*, and name the binding it would displace. A text file cannot know which key you hit; you would have to spell `shift+cmd+g` correctly and find the collision yourself. |
-| Palette (`F5`) | **run** | Do something once. Scroll to top, jump to a block, try a theme. Not configuration. |
+### What was cut
 
-The panel and the palette both write through `Settings::save`. There is no
-second store, so no surface can disagree with the file.
+- `crates/mica-gpu/src/overlay/palette.rs`
+- `crates/mica-gpu/src/overlay/shortcuts.rs`
+- `crates/mica-shell/src/shortcut_panel.rs`
+- The fuzzy matcher in `crates/mica-gpu/src/search.rs`, which existed to rank
+  palette entries. Literal scrollback search is untouched.
+- `Chord::to_display` and `key_display_name` — the `⌘⇧P` spelling. Nothing
+  drew a chord for a human any more.
+- The `palette.toggle` and `keys.open` actions, and their `F5` and `⌘⇧K`
+  bindings. `F5` goes back to the shell as `CSI 15~`.
+- The `theme.*` dispatch prefix, which only the palette could reach. Themes are
+  chosen by name in `[appearance]`; `Surface::set_theme` still runs the
+  cross-fade when the file changes.
 
-### The one real overlap
+**Kept:** find-in-scrollback (`⌘F`) — it is not configuration, and the overlay
+machinery it shares (`TextField`, `OverlayMetrics`, `panel`, `layout_text`)
+stays with it. The `settings.fx.*` actions also stay: they are still bindable
+from `[keys]`, they simply have no default chord and no menu.
 
-The palette carries `settings.fx.*` (caret style, decay, blink, reduce motion,
-ambient light) and the `theme.*` entries. Those *are* settings-file values with
-a fast switch attached — the only entries in the palette that are preferences
-rather than commands.
+**Net: 2,003 lines deleted, 97 added. The binary went from 1,559,344 to
+1,520,800 bytes.**
 
-**Kept.** Trying a caret style by cycling it and watching it is a different act
-from editing a file and switching back, and the cost of keeping them is one
-line each in a table that already exists. If the palette is ever to be strictly
-commands-not-preferences, those five plus the themes are the exact cut list.
+### What was given up, honestly
 
-### What ships
+- **Rebinding by pressing keys.** You now spell a chord — `shift+cmd+g` — and
+  find your own conflicts. The catalogue in the file lists every action and
+  every chord in force, which is what makes that survivable.
+- **Discovery.** A new user has to read the file. It is written out in full,
+  with a commented catalogue of every option above the configuration, which is
+  the argument for why that is acceptable rather than a shrug.
 
-The boundary above, in the module documentation of all three surfaces, each
-pointing at the other two. No behaviour change.
+### Do not re-litigate
+
+This was asked and answered three times before it was cut. If a discovery
+surface is wanted again, it is a new decision with new reasons, not a revert.
 
 ---
 
@@ -173,17 +187,14 @@ quotes) passes backslashes through untouched, which is also correct — that is
 what single quotes mean in TOML, and a binding that needs a literal backslash
 should say so that way.
 
-### Where it does and does not appear
+### Where it appears
 
-`text:` bindings are a **file-only** feature. They do not appear in the
-shortcut panel and cannot be created by capture: the panel edits the fixed
-catalogue of actions Mica implements, and a text binding is an unbounded string
-the panel has no field for. The panel's documentation says so rather than
-pretending the binding does not exist.
+`text:` bindings are not in `BINDABLE` — there is no fixed catalogue of them —
+so the settings-file writer collects them from the binding table itself, and
+the commented catalogue explains the syntax without printing anyone's payload.
 
-The action-honesty test (`every_action_has_a_home`) walks `BINDABLE`; `text:`
-is deliberately not in `BINDABLE`, so that test is unaffected by design and a
-separate test covers the dispatch arm.
+The action-honesty test (`every_action_has_a_home`) walks `BINDABLE`, so it is
+unaffected by design and a separate test covers the dispatch arm.
 
 ### Safety
 
@@ -201,7 +212,6 @@ to nothing.
 - `a_text_binding_carries_its_payload`
 - `an_empty_text_binding_is_refused`
 - `a_text_binding_survives_the_settings_file`
-- `a_text_binding_is_not_offered_in_the_shortcut_panel`
 - `a_text_binding_reaches_the_shell` — end-to-end, real shell.
 
 ---

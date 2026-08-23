@@ -1,11 +1,11 @@
-//! Overlays — the palette and the find bar.
+//! Overlays — the find bar.
 //!
 //! **These are drawn inside the Metal layer, not as AppKit views.** That is why
 //! `ui_text` is a separate pipeline from `cell`: chrome text is positioned in
 //! free pixels rather than snapped to the grid, but it comes from the same
 //! resident atlas and costs the same instanced quad. An overlay opening is one
 //! extra buffer and two extra draw calls — there is no view to instantiate, lay
-//! out, and composite, which is what lets the palette appear within one frame.
+//! out, and composite, which is what lets the bar appear within one frame.
 //!
 //! The trade is that AppKit gives us nothing: no text field, no focus ring, no
 //! key-view loop. Overlays therefore own their own tiny editing model
@@ -13,8 +13,6 @@
 //! that is perhaps eighty lines of code, and it buys the frame back.
 
 pub mod find;
-pub mod palette;
-pub mod shortcuts;
 
 use mica_atlas::atlas::{Atlas, GlyphKey};
 use mica_atlas::fontset::Style;
@@ -166,7 +164,7 @@ impl OverlayMetrics {
 /// Lays out a string as `ui_text` instances and returns the advance width.
 ///
 /// `origin` is the top-left of the text box. Advances are the cell width rather
-/// than the glyph's own, so chrome stays monospaced and columns in the palette
+/// than the glyph's own, so chrome stays monospaced and columns in an overlay
 /// line up — which is the whole reason a terminal's own font is used for its UI.
 #[allow(clippy::too_many_arguments)]
 pub fn layout_text(

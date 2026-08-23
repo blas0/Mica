@@ -21,16 +21,12 @@ use mica_gpu::grid::{
     block_gutters, caret_decay, cursor_shape, Rgba, RowBuilder, SubstrateUniforms, Uniforms,
 };
 use mica_gpu::overlay::find::Find;
-use mica_gpu::overlay::palette::{actions_with_themes, Action, Palette};
-use mica_gpu::overlay::shortcuts::{self, ShortcutRow, ShortcutView};
 use mica_gpu::overlay::OverlayMetrics;
 use mica_gpu::renderer::Renderer;
 
-use crate::bindings::{Bindings, Chord};
+use crate::bindings::Bindings;
 use crate::pane::{CellRect, Direction, Layout, PaneId, DIVIDER};
 use crate::integration::{self, Integration, Shell};
-use crate::keys::{Key, Modifiers};
-use crate::shortcut_panel::{Handled, ShortcutPanel};
 use crate::terminfo;
 
 /// One shell, and everything that belongs to it alone.
@@ -109,12 +105,10 @@ pub struct Surface {
     viewport: (u32, u32),
     focused: bool,
     title: String,
-    palette: Palette,
     find: Find,
-    /// The chord table the window dispatches through, and the panel that
-    /// edits it.
+    /// The chord table the window dispatches through. Edited in
+    /// `settings.toml`, which is the only place it can be edited.
     bindings: Bindings,
-    shortcuts: ShortcutPanel,
     /// Where [`Surface::persist`] writes, and what `⌘,` opens.
     ///
     /// A field rather than a call to [`crate::config::path`] at each use, so a
@@ -223,7 +217,7 @@ impl Surface {
         let motion = settings.motion.sanitised();
         let bindings = Bindings::from_overrides(&settings.keys);
         let root = PaneId(0);
-        let mut surface = Surface {
+        let surface = Surface {
             panes: vec![Pane {
                 id: root,
                 session,
@@ -251,16 +245,10 @@ impl Surface {
             viewport,
             focused: true,
             title: String::from("Mica"),
-            palette: Palette::new(actions_with_themes(&palette_actions(), &theme_ids())),
             find: Find::new(),
             bindings,
-            shortcuts: ShortcutPanel::new(),
             settings_path: crate::config::path(),
         };
-        // The palette prints accelerators from the table, so it has to be told
-        // once at construction as well as after every edit — otherwise every
-        // shortcut reads as unbound until the user opens the panel.
-        surface.refresh_palette_accelerators();
         Ok(surface)
     }
 
@@ -312,10 +300,6 @@ impl Surface {
         &self.settings_path
     }
 
-    pub fn palette(&self) -> &Palette {
-        &self.palette
-    }
-
     pub fn find(&self) -> &Find {
         &self.find
     }
@@ -324,73 +308,11 @@ impl Surface {
     /// before encoding a keystroke for the shell — otherwise typing a query
     /// would also run it.
     pub fn overlay_has_focus(&self) -> bool {
-        self.palette.is_open() || self.find.is_open() || self.shortcuts.is_open()
+        self.find.is_open()
     }
 
     pub fn bindings(&self) -> &Bindings {
         &self.bindings
-    }
-
-    pub fn shortcuts(&self) -> &ShortcutPanel {
-        &self.shortcuts
-    }
-
-    pub fn toggle_shortcuts(&mut self) {
-        if self.shortcuts.is_open() {
-            self.shortcuts.close();
-        } else {
-            self.palette.close();
-            self.find.close();
-            self.shortcuts.open();
-        }
-        self.overlay_changed();
-    }
-
-    /// Routes a key to the shortcut panel. Returns whether it was consumed.
-    ///
-    /// **While capturing, everything is consumed.** That is what lets `⎋` and
-    /// the arrow keys be bound at all: a panel that keeps its own meaning for
-    /// those keys while waiting for a combination is a panel that cannot bind
-    /// them.
-    pub fn shortcut_key(&mut self, key: Key, modifiers: Modifiers) -> bool {
-        if !self.shortcuts.is_open() {
-            return false;
-        }
-        let handled = if self.shortcuts.is_capturing() {
-            self.shortcuts.capture(Chord::new(modifiers, key), &mut self.bindings)
-        } else {
-            match key {
-                Key::Escape => self.shortcuts.escape(),
-                Key::Up => self.shortcuts.move_selection(-1),
-                Key::Down => self.shortcuts.move_selection(1),
-                Key::PageUp | Key::Home => self.shortcuts.move_selection(-100),
-                Key::PageDown | Key::End => self.shortcuts.move_selection(100),
-                Key::Char(' ') | Key::Enter => self.shortcuts.begin_capture(),
-                Key::Backspace | Key::Delete => self.shortcuts.unbind(&mut self.bindings),
-                _ => Handled::Ignored,
-            }
-        };
-
-        if handled == Handled::Changed {
-            self.persist_bindings();
-        }
-        if handled != Handled::Ignored {
-            self.refresh_palette_accelerators();
-            self.overlay_changed();
-        }
-        // Consumed regardless: an open panel owns the keyboard, and letting an
-        // unrecognised key fall through would type it into the shell behind.
-        true
-    }
-
-    /// Writes the changed bindings to `settings.toml`.
-    ///
-    /// A failure is reported and otherwise ignored: the binding is already
-    /// live in this session, and refusing to rebind because the disk is full
-    /// would be a worse answer than rebinding and saying it did not stick.
-    fn persist_bindings(&mut self) {
-        self.settings.keys = self.bindings.overrides();
-        self.persist();
     }
 
     /// Writes the whole settings document — catalogue and configuration.
@@ -402,38 +324,10 @@ impl Surface {
         }
     }
 
-    /// Keeps the accelerators the palette prints in step with the table.
-    ///
-    /// The palette used to carry hardcoded strings, and advertised `⌘↓` for
-    /// two different actions and `⌘↑` for one that had no binding at all.
-    /// Deriving them means they cannot drift again.
-    fn refresh_palette_accelerators(&mut self) {
-        let bindings = &self.bindings;
-        self.palette.set_accelerators(&|id| {
-            bindings.chord_for(id).map(Chord::to_display).unwrap_or_default()
-        });
-    }
-
-    pub fn toggle_palette(&mut self) {
-        if self.palette.is_open() {
-            self.palette.close();
-        } else {
-            self.find.close();
-            // Rebuild, then reapply the accelerators. `set_actions` drops them
-            // on purpose — they are derived, and a palette that kept stale
-            // ones is how it came to advertise shortcuts that did nothing.
-            self.palette.set_actions(&palette_actions(), &theme_ids());
-            self.refresh_palette_accelerators();
-            self.palette.open();
-        }
-        self.overlay_changed();
-    }
-
     pub fn toggle_find(&mut self) {
         if self.find.is_open() {
             self.find.close();
         } else {
-            self.palette.close();
             self.find.open();
             self.refresh_search();
         }
@@ -444,9 +338,7 @@ impl Surface {
         if !self.overlay_has_focus() {
             return false;
         }
-        self.palette.close();
         self.find.close();
-        self.shortcuts.close();
         self.overlay_changed();
         true
     }
@@ -477,9 +369,7 @@ impl Surface {
 
     /// Feeds a character to whichever overlay has focus.
     pub fn overlay_char(&mut self, ch: char) -> bool {
-        let changed = if self.palette.is_open() {
-            self.palette.type_char(ch)
-        } else if self.find.is_open() {
+        let changed = if self.find.is_open() {
             let changed = self.find.type_char(ch);
             if changed {
                 self.refresh_search();
@@ -495,9 +385,7 @@ impl Surface {
     }
 
     pub fn overlay_backspace(&mut self) -> bool {
-        let changed = if self.palette.is_open() {
-            self.palette.backspace()
-        } else if self.find.is_open() {
+        let changed = if self.find.is_open() {
             let changed = self.find.backspace();
             if changed {
                 self.refresh_search();
@@ -514,9 +402,7 @@ impl Surface {
 
     /// Moves the selection, or steps between matches.
     pub fn overlay_step(&mut self, forward: bool) -> bool {
-        let changed = if self.palette.is_open() {
-            if forward { self.palette.select_next() } else { self.palette.select_previous() }
-        } else if self.find.is_open() {
+        let changed = if self.find.is_open() {
             let target = if forward { self.find.next() } else { self.find.previous() };
             if let Some(m) = target {
                 self.scroll_to_line(m.line);
@@ -546,11 +432,6 @@ impl Surface {
 
     /// Accepts the overlay's current entry. Returns an action id if one ran.
     pub fn overlay_accept(&mut self) -> Option<String> {
-        if self.palette.is_open() {
-            let id = self.palette.accept();
-            self.overlay_changed();
-            return id;
-        }
         if self.find.is_open() {
             self.overlay_step(true);
             return None;
@@ -558,11 +439,8 @@ impl Surface {
         None
     }
 
-    /// Runs a palette action. Returns whether it was recognised.
+    /// Runs a bound action. Returns whether it was recognised.
     pub fn dispatch(&mut self, id: &str) -> bool {
-        if let Some(theme) = id.strip_prefix("theme.") {
-            return self.set_theme(theme);
-        }
         // A `text:` binding types for the user. Deliberately not wrapped in
         // bracketed paste: that sequence exists to tell a program "this arrived
         // from a clipboard, do not run it", and a chord the user bound is the
@@ -600,20 +478,12 @@ impl Surface {
                 }
                 true
             }
-            "palette.toggle" => {
-                self.toggle_palette();
-                true
-            }
             "find.toggle" => {
                 self.toggle_find();
                 true
             }
             "find.next" => self.overlay_step(true),
             "find.previous" => self.overlay_step(false),
-            "keys.open" => {
-                self.toggle_shortcuts();
-                true
-            }
             "settings.open" => self.open_settings_file(),
             "session.scroll_top" => {
                 // `history_len` is the whole buffer; scrolling by it saturates
@@ -833,7 +703,7 @@ impl Surface {
     /// How long a theme change takes to cross-fade.
     ///
     /// Long enough to read as a transition rather than a flicker, short enough
-    /// that switching themes in the palette still feels like a switch.
+    /// that a theme change still reads as a change.
     const THEME_FADE: Duration = Duration::from_millis(220);
 
     /// How long a new pane takes to arrive.
@@ -885,7 +755,7 @@ impl Surface {
         &self.motion
     }
 
-    /// Replaces the motion settings — a settings-file reload, a palette
+    /// Replaces the motion settings — a settings-file reload, a bound
     /// action, or the system Reduce Motion preference changing under us.
     ///
     /// Switching to a style that does not interpolate has to land the caret
@@ -923,7 +793,6 @@ impl Surface {
         self.settings.bell = settings.bell;
         self.settings.keys = settings.keys.clone();
         self.bindings = Bindings::from_overrides(&settings.keys);
-        self.refresh_palette_accelerators();
 
         if settings.motion != self.motion {
             self.set_motion(settings.motion);
@@ -1379,44 +1248,13 @@ impl Surface {
         self.renderer.buffers().gutters = gutters;
         let (_, rows) = self.sess().dimensions();
 
-        // Overlays last, so their quads land over the grid.
-        if self.shortcuts.is_open() {
-            let overlay_metrics = OverlayMetrics::from_atlas(
-                &self.atlas,
-                (self.viewport.0 as f32, self.viewport.1 as f32),
-            );
-            let rows = self.shortcuts.rows(&self.bindings);
-            let view_rows: Vec<ShortcutRow<'_>> = rows
-                .iter()
-                .map(|(label, chord)| ShortcutRow { label, chord })
-                .collect();
-            let mut buffers = std::mem::take(self.renderer.buffers());
-            shortcuts::render(
-                ShortcutView {
-                    rows: &view_rows,
-                    selected: self.shortcuts.selected(),
-                    capturing: self.shortcuts.is_capturing(),
-                    notice: self.shortcuts.notice(),
-                },
-                &mut self.atlas,
-                &self.display_material,
-                overlay_metrics,
-                &mut buffers,
-            );
-            *self.renderer.buffers() = buffers;
-        }
-        if self.palette.is_open() || self.find.is_open() {
+        // The overlay last, so its quads land over the grid.
+        if self.find.is_open() {
             let overlay_metrics = OverlayMetrics::from_atlas(
                 &self.atlas,
                 (self.viewport.0 as f32, self.viewport.1 as f32),
             );
             let mut buffers = std::mem::take(self.renderer.buffers());
-            self.palette.render(
-                &mut self.atlas,
-                &self.display_material,
-                overlay_metrics,
-                &mut buffers,
-            );
             self.find.render(
                 &mut self.atlas,
                 &self.display_material,
@@ -1610,25 +1448,6 @@ impl Surface {
     }
 }
 
-/// The palette's base entries — the same catalogue the shortcut panel and the
-/// settings file are built from.
-///
-/// One list, three surfaces. The palette used to carry its own, which is how
-/// it advertised `⌃⇥` for tabs that do not exist and `⌘↓` for two different
-/// actions at once.
-fn palette_actions() -> Vec<Action> {
-    crate::bindings::BINDABLE
-        .iter()
-        .filter(|b| b.implemented)
-        .map(|b| Action::plain(b.id, b.label))
-        .collect()
-}
-
-/// The ids of the built-in themes, for the palette.
-fn theme_ids() -> Vec<String> {
-    mica_core::material::builtin_themes().into_iter().map(|t| t.id).collect()
-}
-
 /// How many cells fit in a drawable.
 ///
 /// Rounded down, and floored at 1×1: a window dragged to zero height must not
@@ -1655,6 +1474,8 @@ pub fn grid_size(viewport: (u32, u32), cell_width: u16, cell_height: u16) -> (u1
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bindings::Chord;
+    use crate::keys::{Key, Modifiers};
     use mica_core::motion::MotionStyle;
 
     fn temp_root(name: &str) -> PathBuf {
@@ -1822,7 +1643,7 @@ mod tests {
     #[test]
     fn the_caret_motion_action_cycles_through_every_style_and_returns() {
         // A toggle would only ever reach two of the seven, which is the bug
-        // this action shipped with in the reference app's own palette naming.
+        // this action shipped with before it cycled.
         let mut s = surface("fx-cycle");
         let first = s.motion().style;
         let mut seen = vec![first];
@@ -1926,15 +1747,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_shortcut_panel_opens_from_its_own_binding() {
-        let mut s = surface("keys-open");
-        let chord = s.bindings().chord_for("keys.open").expect("keys.open is unbound");
-        let id = s.bindings().action(chord).unwrap().to_owned();
-        assert!(s.dispatch(&id));
-        assert!(s.shortcuts().is_open(), "⌘, did not open the panel");
-        assert!(s.overlay_has_focus(), "the panel does not hold the keyboard");
-    }
 
     #[test]
     fn an_edited_settings_file_applies_what_it_can_and_names_what_it_cannot() {
@@ -1995,53 +1807,7 @@ mod tests {
         assert_eq!(s.settings_path(), crate::config::path());
     }
 
-    #[test]
-    fn the_palette_still_prints_its_accelerators_after_being_reopened() {
-        // Regression. `set_theme_ids` rebuilt the action list from scratch,
-        // which dropped every accelerator the binding table had supplied — so
-        // the shortcuts were printed exactly once, at construction, and every
-        // subsequent open showed a palette with a blank right-hand column.
-        let mut s = surface("palette-accel");
-        s.toggle_palette();
-        s.toggle_palette();
-        s.toggle_palette();
 
-        let action = s
-            .palette()
-            .actions()
-            .iter()
-            .find(|a| a.id == "find.toggle")
-            .expect("find.toggle left the palette");
-        assert_eq!(
-            action.shortcut,
-            Chord::new(Modifiers { command: true, ..Modifiers::NONE }, Key::Char('f'))
-                .to_display(),
-            "the palette reopened with no accelerator"
-        );
-    }
-
-    #[test]
-    fn the_palette_offers_exactly_the_actions_that_do_something() {
-        // The palette is a list of things you can pick. An entry that does
-        // nothing when you pick it is the failure; an implemented action
-        // missing from the list is the other one. Both are checked here
-        // because `BINDABLE` is the single source for both directions.
-        let mut s = surface("palette-real");
-        s.toggle_palette();
-        let ids: Vec<&str> = s.palette().actions().iter().map(|a| a.id.as_str()).collect();
-
-        for bindable in crate::bindings::BINDABLE {
-            let listed = ids.contains(&bindable.id);
-            assert_eq!(
-                listed, bindable.implemented,
-                "`{}` is {} in BINDABLE and {} in the palette",
-                bindable.id,
-                if bindable.implemented { "implemented" } else { "not implemented" },
-                if listed { "listed" } else { "missing" }
-            );
-        }
-        assert!(ids.contains(&"find.toggle"), "the palette came up empty");
-    }
 
     #[test]
     fn toggling_ambient_light_changes_what_the_substrate_asks_for() {
@@ -2066,92 +1832,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn arrows_space_and_a_combination_rebind_an_action_end_to_end() {
-        // The whole interaction the panel exists for, driven through the same
-        // entry point the window uses.
-        let mut s = surface("keys-rebind");
-        s.toggle_shortcuts();
 
-        // Walk down to a known row rather than assuming it is the second
-        // one: the order of `BINDABLE` is presentation, not contract.
-        let target = crate::bindings::BINDABLE
-            .iter()
-            .position(|b| b.id == "find.toggle")
-            .expect("find.toggle left the bindable set");
-        for _ in 0..target {
-            s.shortcut_key(Key::Down, Modifiers::NONE);
-        }
-        let id = s.shortcuts().selected_id().expect("nothing selected");
-        assert_eq!(id, "find.toggle");
 
-        s.shortcut_key(Key::Char(' '), Modifiers::NONE);
-        assert!(s.shortcuts().is_capturing());
 
-        let chord = Chord::new(Modifiers { command: true, ..Modifiers::NONE }, Key::Char('j'));
-        s.shortcut_key(chord.key(), chord.modifiers());
-        assert_eq!(s.bindings().chord_for("find.toggle"), Some(chord));
-        assert!(!s.shortcuts().is_capturing());
-    }
 
-    #[test]
-    fn the_panel_swallows_every_key_while_it_is_open() {
-        // Anything falling through would be typed into the shell behind the
-        // panel, which the user cannot see happening.
-        let mut s = surface("keys-swallow");
-        s.toggle_shortcuts();
-        for key in [Key::Char('x'), Key::Enter, Key::Tab, Key::Left, Key::Function(5)] {
-            assert!(s.shortcut_key(key, Modifiers::NONE), "{key:?} escaped the panel");
-        }
-    }
-
-    #[test]
-    fn a_closed_panel_consumes_nothing() {
-        let mut s = surface("keys-closed");
-        assert!(!s.shortcut_key(Key::Down, Modifiers::NONE));
-    }
-
-    #[test]
-    fn the_palette_prints_the_accelerators_the_table_actually_holds() {
-        // The drift this table exists to end: the palette used to advertise
-        // `⌘↓` for two different actions and `⌘↑` for one that had no binding.
-        let mut s = surface("keys-palette");
-        let check = |s: &Surface| {
-            for action in s.palette().actions() {
-                let expected = s
-                    .bindings()
-                    .chord_for(&action.id)
-                    .map(Chord::to_display)
-                    .unwrap_or_default();
-                assert_eq!(
-                    action.shortcut, expected,
-                    "the palette shows {:?} for {} but the table says {:?}",
-                    action.shortcut, action.id, expected
-                );
-            }
-        };
-        check(&s);
-
-        // And after an edit, not just at startup.
-        s.toggle_shortcuts();
-        s.shortcut_key(Key::Char(' '), Modifiers::NONE);
-        s.shortcut_key(Key::Char('j'), Modifiers { command: true, ..Modifiers::NONE });
-        check(&s);
-    }
-
-    #[test]
-    fn no_two_actions_advertise_the_same_accelerator() {
-        let s = surface("keys-unique");
-        let mut seen = std::collections::HashMap::new();
-        for action in s.palette().actions() {
-            if action.shortcut.is_empty() {
-                continue;
-            }
-            if let Some(other) = seen.insert(action.shortcut.clone(), action.id.clone()) {
-                panic!("{} and {} both claim {}", other, action.id, action.shortcut);
-            }
-        }
-    }
 
     #[test]
     fn an_idle_surface_with_a_still_caret_submits_nothing() {
@@ -2279,9 +1963,9 @@ mod tests {
         let mut s = surface("overlay-focus");
         assert!(!s.overlay_has_focus());
 
-        s.toggle_palette();
+        s.toggle_find();
         assert!(s.overlay_has_focus());
-        assert!(s.palette().is_open());
+        assert!(s.find().is_open());
 
         assert!(s.close_overlays());
         assert!(!s.overlay_has_focus());
@@ -2289,31 +1973,8 @@ mod tests {
     }
 
     #[test]
-    fn opening_one_overlay_closes_the_other() {
-        let mut s = surface("overlay-exclusive");
-        s.toggle_palette();
-        s.toggle_find();
-        assert!(s.find().is_open());
-        assert!(!s.palette().is_open(), "two overlays had the keyboard at once");
-    }
-
-    #[test]
-    fn typing_into_the_palette_narrows_it_and_enter_dispatches() {
-        let mut s = surface("palette-type");
-        s.toggle_palette();
-        for ch in "quartz".chars() {
-            assert!(s.overlay_char(ch));
-        }
-        let id = s.overlay_accept().expect("the palette selected nothing");
-        assert_eq!(id, "theme.quartz");
-        assert!(s.dispatch(&id), "the theme action was not recognised");
-        assert_eq!(s.target_theme().id, "quartz");
-        assert!(!s.palette().is_open(), "accepting did not close the palette");
-    }
-
-    #[test]
     fn an_unimplemented_action_reports_itself_rather_than_doing_nothing_quietly() {
-        let mut s = surface("palette-unimplemented");
+        let mut s = surface("unimplemented-action");
         assert!(!s.dispatch("settings.fx.depth"));
         assert!(!s.dispatch("no.such.action"));
     }
@@ -2357,7 +2018,7 @@ mod tests {
             s.scheduler().begin_frame();
             s.scheduler().end_frame();
         }
-        s.toggle_palette();
+        s.toggle_find();
         assert!(s.scheduler().is_dirty(), "the overlay did not schedule a frame");
     }
 

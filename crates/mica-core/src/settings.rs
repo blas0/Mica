@@ -651,7 +651,7 @@ mod tests {
         s.keys.insert("find.toggle".into(), "cmd+j".into());
         // An empty value is how a deliberately unbound action is recorded, and
         // it has to survive the round trip or the removal is silently undone.
-        s.keys.insert("palette.toggle".into(), String::new());
+        s.keys.insert("find.toggle".into(), String::new());
 
         let text = s.serialize().unwrap();
         assert!(text.contains("[keys]"), "{text}");

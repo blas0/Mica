@@ -154,7 +154,7 @@ oversight.** A blink is a change on a schedule, and a change on a schedule is
 frames — roughly one per display refresh, forever, for decoration. It is the one
 thing in `motion.rs` that never settles, and the test asserting so exists to
 stop someone quietly optimising it into a caret that has stopped blinking. Turn
-it on with `blink = true` or `⌘⇧P → Toggle Caret Blink`, knowing what it costs.
+it on with `blink = true` in `[motion]`, knowing what it costs.
 
 Reduce Motion collapses all of it — travel, deformation, trail, and the theme
 cross-fade — to a single 90 ms fade. The app setting and the macOS system
@@ -177,7 +177,7 @@ window opens rather than observed live.
 | 6 AppKit shell | ✅ window, keys, menu, native tabbing |
 | 7 Shell integration | ✅ zsh, bash, fish |
 | 8 terminfo | ✅ `tic -x` + `infocmp -x` round-trip |
-| 9 Config, themes, palette, find | ✅ |
+| 9 Config, themes, find | ✅ |
 | 10 Packaging | ◐ bundle and hardened runtime; notarisation not attempted |
 
 ### The two things that are not done
@@ -197,37 +197,52 @@ there — that is not a passing Phase 10 exit test.
 
 Also deliberately out of scope for v0.1, per the plan: splits, the full theme
 set, caret motion styles, block folding, OSC 9/777 notifications, Sparkle
-updates, the settings UI, and the content-aware renderers. The palette lists
-`settings.fx.*` actions that are not implemented; `dispatch` returns `false` for
-them and says so on stderr rather than appearing to work.
+updates, the settings UI, and the content-aware renderers. `BINDABLE` carries a
+few actions that are not implemented; `dispatch` returns `false` for them and
+says so on stderr rather than appearing to work.
 
 ---
 
 ## Keys
 
-| | |
+Every binding, as `settings.toml` writes it. The catalogue commented above
+`[keys]` in the file itself is generated from the same table, so it cannot
+drift from this.
+
+| Chord | Action |
 |---|---|
-| `⌘⇧P` | command palette |
+| `⌘,` | open `settings.toml` |
+| `⌘⇧,` | reload `settings.toml` in place |
 | `⌘F` | find in scrollback |
 | `⌘G` / `⌘⇧G` | next / previous match |
-| `⌘N` | new window (a tab, via native tabbing) |
-| `⌘C` / `⌘V` | copy selection / paste, bracketed |
-| `⌘,` | keyboard shortcuts |
+| `⌘↓` / `⌘↑` | scroll to bottom / top |
 | `⌘]` / `⌘[` | next / previous command block |
+| `⌥⌘←→↑↓` | split the pane that way |
+| `⌥⇧⌘←→↑↓` | move focus that way |
+| `⌘⇧W` | close the pane |
+| `⌘T` | new tab |
+| `⌃⇥` / `⌃⇧⇥` | next / previous tab |
+| `⌘N` | new window |
+| `⌘C` / `⌘V` | copy selection / paste, bracketed |
 | `⌥⌫` | delete the word to the left |
 | `⌘⌫` | delete to the start of the line |
-| `⎋` | close an overlay |
+| `⎋` | close the find bar |
 
-`⌘⇧P` also carries `Caret Motion · Next Style`, `Toggle Caret Decay`,
-`Toggle Caret Blink`, and `Toggle Reduce Motion`.
+Bound to nothing by default, bindable in `[keys]`: `settings.fx.cursor`,
+`settings.fx.decay`, `settings.fx.blink`, `settings.fx.reduce`,
+`settings.fx.ambient`, `session.clear_selection`.
 
-Every shortcut above except copy, paste and the deletion keys is rebindable in
-`⌘,` — arrows to move, space to capture a combination, `⌫` to unbind, `⎋` to
-close. Changes land in `[keys]` in `settings.toml`, only where they differ from
-the defaults. There is exactly one table: the window dispatches through it, the
-palette prints its accelerator column from it, and the panel edits it. Before
-that they were separate, and had already drifted — the palette advertised `⌘↓`
-for two different actions and `⌘↑` for one that had no binding at all.
+Everything above except copy, paste and the deletion keys is rebindable, by
+editing `[keys]` in `settings.toml`. An action bound to `""` is deliberately
+unbound. An action named `text:…` types the rest of its own name into the
+shell:
+
+    [keys]
+    "text:clear && ls -la\n" = "cmd+shift+l"
+
+There is exactly one table, and `settings.toml` is the only thing that edits
+it. There used to be a command palette and a shortcut-capture panel as well;
+both were removed — `docs/FOLLOW-UPS.md`, FU-2, has the reasoning.
 
 `⌘⌫` sends `^U`. Worth knowing what that means, because the two common shells
 disagree and it was checked rather than assumed: **bash** binds it to

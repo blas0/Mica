@@ -9,23 +9,15 @@
 //! `⌘,` is Settings on a Mac, and Mica's settings are a file. Opening the file
 //! is the honest thing: everything is in one place, it is greppable and
 //! committable, and there is no second surface that can disagree with it.
-//! `⌘⇧K` opens the shortcut panel, which edits exactly one section of the same
-//! file.
+//! ## One surface
 //!
-//! ## Three surfaces, three verbs
-//!
-//! - **`settings.toml`** (`⌘,`) *records*. It persists, diffs, commits and
-//!   travels, and it is the only writer — the other two save through it, so no
-//!   surface can disagree with the file.
-//! - **The shortcut panel** (`⌘⇧K`) *captures*. It is the only surface that can
-//!   learn a chord from the press rather than from a spelling, and name the
-//!   binding that press would displace.
-//! - **The palette** (`F5`) *runs*. One-shot actions — scroll to top, jump to a
-//!   block, try a theme. Not configuration.
-//!
-//! The palette's `settings.fx.*` and `theme.*` entries are the one deliberate
-//! overlap: settings-file values with a fast switch attached, kept because
-//! trying a caret style by watching it is not the same act as editing a file.
+//! There was also a command palette (`F5`) and a shortcut-capture panel
+//! (`⌘⇧K`). Both are gone. Between them they held about 2,500 lines to offer a
+//! second and third way to do what this file already did, and the boundary
+//! between the three was never obvious enough to be worth the drift risk. The
+//! file is now the only configuration surface: it persists, diffs, commits and
+//! travels, and nothing else writes it. `docs/FOLLOW-UPS.md`, FU-2, has the
+//! reasoning and what was given up.
 
 use std::path::{Path, PathBuf};
 
@@ -144,7 +136,7 @@ mod tests {
     fn the_documented_chords_are_the_ones_the_table_holds() {
         // The catalogue is generated from the table rather than written down,
         // so the file cannot advertise a shortcut that does not work — which
-        // is exactly what the palette used to do.
+        // is exactly what the old palette used to do.
         let bindings = Bindings::defaults();
         for doc in key_docs(&bindings) {
             if doc.chord.is_empty() {
@@ -162,17 +154,18 @@ mod tests {
     }
 
     #[test]
-    fn the_palette_is_bound_to_f5_and_settings_to_command_comma() {
-        // The two entry points, pinned. They are the only shortcuts a new user
-        // has to be told about, so they are the two that must not drift.
+    fn settings_is_bound_to_command_comma_and_reload_beside_it() {
+        // The two shortcuts a new user has to be told about, and the only two
+        // now that configuration is one surface. They are the ones that must
+        // not drift.
         let bindings = Bindings::defaults();
-        assert_eq!(
-            bindings.chord_for("palette.toggle").map(Chord::to_config).as_deref(),
-            Some("f5")
-        );
         assert_eq!(
             bindings.chord_for("settings.open").map(Chord::to_config).as_deref(),
             Some("cmd+,")
+        );
+        assert_eq!(
+            bindings.chord_for("settings.reload"),
+            Chord::parse("cmd+shift+,")
         );
     }
 

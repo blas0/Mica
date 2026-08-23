@@ -1,6 +1,6 @@
 //! The symbols a Mac menu uses for keyboard shortcuts.
 //!
-//! `⌘⌥⇧⌃⌫⌦⎋⇥↩` are what the palette, the shortcut panel, and the settings
+//! `⌘⌥⇧⌃⌫⌦⎋⇥↩` are what [`Chord::to_display`] emits, and what the settings
 //! catalogue print. None of them are in a monospace programming face, so every
 //! one reaches CoreText's fallback — which is the same path that produced black,
 //! untintable glyphs for CJK before `kCTForegroundColorFromContextAttributeName`
@@ -81,7 +81,7 @@ fn every_shortcut_symbol_comes_back_tintable() {
 
 #[test]
 fn a_shortcut_symbol_stays_inside_its_cell() {
-    // The palette right-aligns these against a column of them. One that
+    // These are read as a column of chords. One that
     // overhangs pushes into the label beside it.
     let fonts = fonts();
     let cell_width = fonts.metrics().width as i32;
