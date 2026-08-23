@@ -72,9 +72,10 @@ pub fn document(settings: &Settings, keys: &[KeyDoc]) -> Result<String, Settings
     out.push_str("# discarded, so a stray bracket cannot lose your theme.\n");
     out.push_str("#\n");
     out.push_str("# Edits apply when Mica next becomes the active application — save\n");
-    out.push_str("# here, switch back, done. Theme, caret motion, ambient light and key\n");
-    out.push_str("# bindings take effect immediately; font, grid size, scrollback and\n");
-    out.push_str("# [shell] wait for the next launch.\n");
+    out.push_str("# here, switch back, done. Without leaving Mica, press cmd+shift+,\n");
+    out.push_str("# to apply this file where it stands. Theme, caret motion, ambient\n");
+    out.push_str("# light and key bindings take effect immediately; font, grid size,\n");
+    out.push_str("# scrollback and [shell] wait for the next launch.\n");
     out.push('\n');
 
     out.push_str(FLAGS_START);
@@ -173,6 +174,19 @@ fn flags(out: &mut String, keys: &[KeyDoc]) {
     out.push_str("#   pageup, pagedown, up, down, left, right, f1 … f12.\n");
     out.push_str("#   An empty value unbinds the action deliberately.\n");
     out.push_str("#\n");
+    out.push_str("#   An action named `text:…` types the rest of its name into the\n");
+    out.push_str("#   shell — \"text:clear && ls -la\\n\" = \"cmd+shift+l\". Escapes are\n");
+    out.push_str("#   TOML's own, so \\n, \\t and \\u001b work in a \"quoted\" value and\n");
+    out.push_str("#   nothing is escaped in a 'literal' one. Those bindings live in\n");
+    out.push_str("#   [keys] below and are not listed here: this is a catalogue of what\n");
+    out.push_str("#   Mica offers, and they are text you wrote.\n");
+    out.push_str("#\n");
+    // The `text:` prefix belongs to the file format, which is this crate's, so
+    // recognising it here is not the window layer leaking in. Skipping those
+    // entries is also load-bearing rather than tidy: a payload containing a
+    // newline would end the comment line it was printed on and take the rest of
+    // the catalogue out of the comment with it.
+    let keys: Vec<&KeyDoc> = keys.iter().filter(|k| !k.action.starts_with("text:")).collect();
     let width = keys.iter().map(|k| k.action.len()).max().unwrap_or(0).max(1);
     for key in keys {
         let chord = if key.chord.is_empty() { "".to_owned() } else { key.chord.clone() };

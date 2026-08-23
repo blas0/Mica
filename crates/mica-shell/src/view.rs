@@ -351,8 +351,14 @@ define_class!(
 /// Named in one place because `BINDABLE` claims every one of them is
 /// implemented, and the test that checks that claim has to know which half of
 /// the app to look in.
-pub const WINDOW_ACTIONS: [&str; 3] =
-    ["session.new_tab", "session.next_tab", "session.previous_tab"];
+pub const WINDOW_ACTIONS: [&str; 4] = [
+    "session.new_tab",
+    "session.next_tab",
+    "session.previous_tab",
+    // Reload is here rather than on the surface because it applies to every
+    // window, not to the pane that happens to have focus.
+    "settings.reload",
+];
 
 impl MicaView {
     /// An event's location in this view, in points from the **top** left.
@@ -655,6 +661,15 @@ impl MicaView {
             }
             "session.previous_tab" => {
                 unsafe { window.selectPreviousTab(None) };
+                true
+            }
+            "settings.reload" => {
+                let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
+                let Some(delegate) = app.delegate() else { return false };
+                let Ok(delegate) = delegate.downcast::<crate::app::AppDelegate>() else {
+                    return false;
+                };
+                delegate.reload_settings_now();
                 true
             }
             _ => false,

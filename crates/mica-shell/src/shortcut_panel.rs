@@ -8,6 +8,25 @@
 //!
 //! The state machine is here rather than in the view because it is the part
 //! worth testing, and it needs no window to run.
+//!
+//! What the panel cannot do is a `text:` binding — a chord that types for the
+//! user. Those are an unbounded string the panel has no field for, so they are
+//! a file-only feature; see [`crate::bindings::text_payload`].
+//!
+//! ## Three surfaces, three verbs
+//!
+//! - **`settings.toml`** (`⌘,`) *records*. It persists, diffs, commits and
+//!   travels, and it is the only writer — the other two save through it, so no
+//!   surface can disagree with the file.
+//! - **The shortcut panel** (`⌘⇧K`) *captures*. It is the only surface that can
+//!   learn a chord from the press rather than from a spelling, and name the
+//!   binding that press would displace.
+//! - **The palette** (`F5`) *runs*. One-shot actions — scroll to top, jump to a
+//!   block, try a theme. Not configuration.
+//!
+//! The palette's `settings.fx.*` and `theme.*` entries are the one deliberate
+//! overlap: settings-file values with a fast switch attached, kept because
+//! trying a caret style by watching it is not the same act as editing a file.
 
 use crate::bindings::{Bindings, Chord, BINDABLE};
 
