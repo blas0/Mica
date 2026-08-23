@@ -15,16 +15,18 @@
 use std::cell::RefCell;
 
 use objc2::rc::Retained;
-use objc2::{define_class, msg_send, DeclaredClass, MainThreadMarker, MainThreadOnly};
+use objc2::{define_class, msg_send, AnyThread, DeclaredClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType,
-    NSMenu, NSMenuItem, NSPasteboard, NSPasteboardTypeString, NSWindow,
+    NSBeep, NSMenu, NSMenuItem, NSPasteboard, NSPasteboardTypeString, NSRequestUserAttentionType, NSWindow,
     NSWindowCollectionBehavior, NSWindowDelegate, NSWindowOrderingMode, NSWindowStyleMask,
     NSWindowTabbingMode,
     NSWorkspace,
 };
+#[allow(deprecated)]
 use objc2_foundation::{
     NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
+    NSUserNotification, NSUserNotificationCenter,
 };
 
 use mica_core::session::SessionEvent;
@@ -115,6 +117,13 @@ define_class!(
                     NSPasteboardTypeString,
                 );
             }
+        }
+
+        #[unsafe(method(selectAllText:))]
+        fn select_all_text(&self, _sender: Option<&NSObject>) {
+            let mtm = MainThreadMarker::from(self);
+            let Some(view) = key_view(mtm) else { return };
+            view.select_all();
         }
 
         #[unsafe(method(pasteText:))]
@@ -261,6 +270,7 @@ impl AppDelegate {
             window.setCollectionBehavior(
                 NSWindowCollectionBehavior::FullScreenPrimary,
             );
+            window.setAcceptsMouseMovedEvents(true);
             window.setReleasedWhenClosed(false);
             window.setDelegate(Some(objc2::runtime::ProtocolObject::from_ref(self)));
         }
@@ -326,9 +336,48 @@ impl AppDelegate {
                 SessionEvent::Exited(_) => unsafe {
                     window.performClose(None);
                 },
-                // Notifications, the bell, and clipboard writes are Phase 9
-                // work; nothing here should fail silently once they land.
-                _ => {}
+                SessionEvent::ClipboardWrite(text) => {
+                    // Bound what one escape sequence may place in the global
+                    // pasteboard. The parser has already decoded OSC 52; this
+                    // is the final policy boundary before shared system state.
+                    if text.len() <= 1024 * 1024 {
+                        let pasteboard = unsafe { NSPasteboard::generalPasteboard() };
+                        unsafe {
+                            pasteboard.clearContents();
+                            pasteboard.setString_forType(
+                                &NSString::from_str(text),
+                                NSPasteboardTypeString,
+                            );
+                        }
+                    } else {
+                        eprintln!("mica: ignored OSC 52 clipboard payload larger than 1 MiB");
+                    }
+                }
+                SessionEvent::Bell => match self.ivars().settings.borrow().bell {
+                    mica_core::settings::Bell::Audible => unsafe { NSBeep() },
+                    mica_core::settings::Bell::Visual => {
+                        let mtm = MainThreadMarker::from(self);
+                        let app = NSApplication::sharedApplication(mtm);
+                        unsafe {
+                            app.requestUserAttention(NSRequestUserAttentionType::InformationalRequest);
+                        }
+                    }
+                    mica_core::settings::Bell::Off => {}
+                },
+                SessionEvent::Notification { title, body } => {
+                    #[allow(deprecated)]
+                    let notification = NSUserNotification::init(NSUserNotification::alloc());
+                    #[allow(deprecated)]
+                    unsafe {
+                        notification.setTitle(Some(&NSString::from_str(
+                            title.as_deref().unwrap_or("Mica"),
+                        )));
+                        notification.setInformativeText(Some(&NSString::from_str(body)));
+                        NSUserNotificationCenter::defaultUserNotificationCenter()
+                            .deliverNotification(&notification);
+                    }
+                }
+                SessionEvent::CwdChanged(_) => {}
             }
         }
     }
@@ -416,6 +465,15 @@ pub fn build_menu(mtm: MainThreadMarker, delegate: &AppDelegate) -> Retained<NSM
         );
         paste.setTarget(Some(delegate));
         edit_menu.addItem(&paste);
+
+        let select_all = NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            &NSString::from_str("Select All"),
+            Some(objc2::sel!(selectAllText:)),
+            &NSString::from_str("a"),
+        );
+        select_all.setTarget(Some(delegate));
+        edit_menu.addItem(&select_all);
         edit_item.setSubmenu(Some(&edit_menu));
     }
     menubar.addItem(&edit_item);

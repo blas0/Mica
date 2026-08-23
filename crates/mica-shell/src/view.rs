@@ -25,19 +25,26 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
+use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{define_class, msg_send, DeclaredClass, MainThreadMarker, MainThreadOnly};
-use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventPhase, NSView};
+use objc2_app_kit::{
+    NSEvent, NSEventModifierFlags, NSEventPhase, NSPasteboard, NSPasteboardTypeString,
+    NSTextInputClient, NSView, NSWorkspace,
+};
 use objc2_core_foundation::CGSize;
-use objc2_foundation::{NSNotification, NSObjectProtocol, NSRect, NSSize};
+use objc2_foundation::{
+    NSArray, NSAttributedString, NSAttributedStringKey, NSNotification, NSObjectProtocol, NSPoint,
+    NSRange, NSRangePointer, NSRect, NSSize, NSString, NSURL, NSNotFound, NSUInteger,
+};
 use objc2_quartz_core::{CALayer, CAMetalDrawable, CAMetalLayer};
 
+use mica_core::backend::SelectionKind;
 use mica_core::session::SessionEvent;
 
 use crate::bindings::Chord;
 use crate::keys::{CursorKeyMode, Key, KeyConfig, Modifiers};
 use crate::scroll::ScrollAccumulator;
-use crate::surface::Surface;
+use crate::surface::{MouseAction, MouseButton, Surface};
 
 // libdispatch, declared here rather than pulled in as a dependency: two symbols
 // is not worth a crate, and the ABI has been stable for fifteen years.
@@ -139,6 +146,11 @@ pub struct MicaViewState {
     pub frame_queued: Arc<AtomicBool>,
     /// Keeps the sub-line remainder of trackpad scrolling.
     pub scroll: RefCell<ScrollAccumulator>,
+    /// The button currently owned by a mouse-aware child, if any.
+    pub reported_button: Cell<Option<MouseButton>>,
+    /// AppKit-owned composition that has not been committed to the PTY yet.
+    pub marked_text: RefCell<String>,
+    pub marked_selection: Cell<NSRange>,
 }
 
 /// What crosses the thread boundary to the main queue.
@@ -167,8 +179,136 @@ define_class!(
     pub struct MicaView;
 
     unsafe impl NSObjectProtocol for MicaView {}
+    unsafe impl NSTextInputClient for MicaView {}
 
     impl MicaView {
+        #[unsafe(method(insertText:replacementRange:))]
+        unsafe fn insert_text(&self, string: &AnyObject, _replacement_range: NSRange) {
+            let Some(text) = Self::input_text(string) else { return };
+            self.ivars().marked_text.borrow_mut().clear();
+            self.ivars().marked_selection.set(NSRange::new(0, 0));
+            if let Some(surface) = self.ivars().surface.borrow_mut().as_mut() {
+                surface.set_composition("");
+                surface.write_input(text.as_bytes());
+            }
+            self.redraw();
+        }
+
+        #[unsafe(method(doCommandBySelector:))]
+        unsafe fn do_command_by_selector(&self, _selector: Sel) {}
+
+        #[unsafe(method(setMarkedText:selectedRange:replacementRange:))]
+        unsafe fn set_marked_text(
+            &self,
+            string: &AnyObject,
+            selected_range: NSRange,
+            _replacement_range: NSRange,
+        ) {
+            let Some(text) = Self::input_text(string) else { return };
+            *self.ivars().marked_text.borrow_mut() = text;
+            self.ivars().marked_selection.set(selected_range);
+            if let Some(surface) = self.ivars().surface.borrow_mut().as_mut() {
+                surface.set_composition(&self.ivars().marked_text.borrow());
+            }
+            self.redraw();
+        }
+
+        #[unsafe(method(unmarkText))]
+        fn unmark_text(&self) {
+            self.ivars().marked_text.borrow_mut().clear();
+            self.ivars().marked_selection.set(NSRange::new(0, 0));
+            if let Some(surface) = self.ivars().surface.borrow_mut().as_mut() {
+                surface.set_composition("");
+            }
+            self.redraw();
+        }
+
+        #[unsafe(method(selectedRange))]
+        fn selected_range(&self) -> NSRange {
+            NSRange::new(NSNotFound as usize, 0)
+        }
+
+        #[unsafe(method(markedRange))]
+        fn marked_range(&self) -> NSRange {
+            let text = self.ivars().marked_text.borrow();
+            if text.is_empty() {
+                NSRange::new(NSNotFound as usize, 0)
+            } else {
+                NSRange::new(0, text.encode_utf16().count())
+            }
+        }
+
+        #[unsafe(method(hasMarkedText))]
+        fn has_marked_text(&self) -> bool {
+            !self.ivars().marked_text.borrow().is_empty()
+        }
+
+        #[unsafe(method_id(attributedSubstringForProposedRange:actualRange:))]
+        unsafe fn attributed_substring(
+            &self,
+            _range: NSRange,
+            actual_range: NSRangePointer,
+        ) -> Option<Retained<NSAttributedString>> {
+            if !actual_range.is_null() {
+                *actual_range = NSRange::new(NSNotFound as usize, 0);
+            }
+            None
+        }
+
+        #[unsafe(method_id(validAttributesForMarkedText))]
+        fn valid_attributes_for_marked_text(&self) -> Retained<NSArray<NSAttributedStringKey>> {
+            NSArray::array()
+        }
+
+        #[unsafe(method(firstRectForCharacterRange:actualRange:))]
+        unsafe fn first_rect_for_character_range(
+            &self,
+            range: NSRange,
+            actual_range: NSRangePointer,
+        ) -> NSRect {
+            if !actual_range.is_null() {
+                *actual_range = range;
+            }
+            self.composition_rect()
+        }
+
+        #[unsafe(method(characterIndexForPoint:))]
+        fn character_index_for_point(&self, _point: NSPoint) -> NSUInteger {
+            NSNotFound as usize
+        }
+
+        #[unsafe(method(isAccessibilityElement))]
+        fn is_accessibility_element(&self) -> bool {
+            true
+        }
+
+        #[unsafe(method_id(accessibilityRole))]
+        fn accessibility_role(&self) -> Retained<NSString> {
+            NSString::from_str("AXTextArea")
+        }
+
+        #[unsafe(method_id(accessibilityLabel))]
+        fn accessibility_label(&self) -> Retained<NSString> {
+            NSString::from_str("Terminal")
+        }
+
+        #[unsafe(method_id(accessibilityValue))]
+        fn accessibility_value(&self) -> Retained<NSString> {
+            let text = self
+                .ivars()
+                .surface
+                .borrow()
+                .as_ref()
+                .map(Surface::accessibility_text)
+                .unwrap_or_default();
+            NSString::from_str(&text)
+        }
+
+        #[unsafe(method_id(accessibilitySelectedText))]
+        fn accessibility_selected_text(&self) -> Retained<NSString> {
+            NSString::from_str(&self.selection_text().unwrap_or_default())
+        }
+
         /// A `CAMetalLayer` rather than a plain layer. Returning it from
         /// `makeBackingLayer` is what makes the view Metal-backed without an
         /// `MTKView`, which brings its own display link and its own redraw
@@ -224,16 +364,9 @@ define_class!(
 
             let decoded = decode(key_code, &characters, modifiers);
 
-            // The shortcut panel comes first and, while capturing, swallows
-            // everything — including ⎋ and the arrow keys, which is the only
-            // way those can be bound to anything.
+            // Bound chords first, so ⌘F still works while an overlay
+            // already has the keyboard.
             if let Some(key) = decoded {
-                if self.handle_shortcut_panel(key, modifiers) {
-                    self.redraw();
-                    return;
-                }
-                // Bound chords next, so ⌘F still works while an overlay
-                // already has the keyboard.
                 if self.handle_binding(key, modifiers) {
                     self.redraw();
                     return;
@@ -247,6 +380,14 @@ define_class!(
             }
 
             let Some(key) = decoded else { return };
+            if !modifiers.command
+                && (!self.ivars().marked_text.borrow().is_empty()
+                    || (matches!(key, Key::Char(_)) && !modifiers.control))
+            {
+                let events = NSArray::arrayWithObject(event);
+                self.interpretKeyEvents(&events);
+                return;
+            }
             let config = *self.ivars().key_config.borrow();
             let Some(bytes) = crate::keys::encode(&key, modifiers, config) else { return };
 
@@ -293,29 +434,95 @@ define_class!(
             }
             // The pointer decides which pane scrolls, not the keyboard focus.
             let (x, y) = self.point_in_view(event);
+            let flags = unsafe { event.modifierFlags() };
+            if !flags.contains(NSEventModifierFlags::Shift) && surface.mouse_reporting_at(x, y) {
+                let button = if lines > 0 {
+                    MouseButton::WheelUp
+                } else {
+                    MouseButton::WheelDown
+                };
+                let modifiers = Self::mouse_modifiers(event);
+                for _ in 0..lines.unsigned_abs().min(32) {
+                    surface.report_mouse(
+                        x,
+                        y,
+                        Some(button),
+                        MouseAction::Press,
+                        modifiers,
+                    );
+                }
+                self.redraw();
+                return;
+            }
             surface.scroll_at(lines, x, y);
             self.redraw();
         }
 
-        /// A click focuses the pane under it.
-        ///
-        /// The only way to move focus with the mouse, and the reason panes do
-        /// not need a title bar to be usable. A click on a divider is ignored
-        /// rather than guessing which side was meant.
+        /// Begins a native terminal selection and focuses its pane.
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
+            self.begin_pointer(event, MouseButton::Left);
+        }
+
+        #[unsafe(method(mouseDragged:))]
+        fn mouse_dragged(&self, event: &NSEvent) {
+            self.drag_pointer(event);
+        }
+
+        #[unsafe(method(mouseUp:))]
+        fn mouse_up(&self, event: &NSEvent) {
+            self.end_pointer(event);
+        }
+
+        #[unsafe(method(rightMouseDown:))]
+        fn right_mouse_down(&self, event: &NSEvent) {
+            self.begin_pointer(event, MouseButton::Right);
+        }
+
+        #[unsafe(method(rightMouseDragged:))]
+        fn right_mouse_dragged(&self, event: &NSEvent) {
+            self.drag_pointer(event);
+        }
+
+        #[unsafe(method(rightMouseUp:))]
+        fn right_mouse_up(&self, event: &NSEvent) {
+            self.end_pointer(event);
+        }
+
+        #[unsafe(method(otherMouseDown:))]
+        fn other_mouse_down(&self, event: &NSEvent) {
+            self.begin_pointer(event, MouseButton::Middle);
+        }
+
+        #[unsafe(method(otherMouseDragged:))]
+        fn other_mouse_dragged(&self, event: &NSEvent) {
+            self.drag_pointer(event);
+        }
+
+        #[unsafe(method(otherMouseUp:))]
+        fn other_mouse_up(&self, event: &NSEvent) {
+            self.end_pointer(event);
+        }
+
+        #[unsafe(method(mouseMoved:))]
+        fn mouse_moved(&self, event: &NSEvent) {
+            if unsafe { event.modifierFlags() }.contains(NSEventModifierFlags::Shift) {
+                return;
+            }
             let (x, y) = self.point_in_view(event);
-            let moved = self
+            let modifiers = Self::mouse_modifiers(event);
+            if self
                 .ivars()
                 .surface
                 .borrow_mut()
                 .as_mut()
-                .is_some_and(|s| s.focus_pane_at(x, y));
-            if moved {
+                .is_some_and(|surface| {
+                    surface.report_mouse(x, y, None, MouseAction::Motion, modifiers)
+                })
+            {
                 self.redraw();
             }
         }
-
 
         #[unsafe(method(setFrameSize:))]
         fn set_frame_size(&self, size: NSSize) {
@@ -361,6 +568,171 @@ pub const WINDOW_ACTIONS: [&str; 4] = [
 ];
 
 impl MicaView {
+    fn input_text(string: &AnyObject) -> Option<String> {
+        if let Some(text) = string.downcast_ref::<NSString>() {
+            return Some(text.to_string());
+        }
+        string
+            .downcast_ref::<NSAttributedString>()
+            .map(|text| text.string().to_string())
+    }
+
+    fn composition_rect(&self) -> NSRect {
+        let local = self
+            .ivars()
+            .surface
+            .borrow()
+            .as_ref()
+            .map(|surface| {
+                let [column, line] = surface.caret_position();
+                let width = surface.cell_width_points() as f64;
+                let height = surface.cell_height_points() as f64;
+                NSRect::new(
+                    NSPoint::new(
+                        column as f64 * width,
+                        self.bounds().size.height - (line as f64 + 1.0) * height,
+                    ),
+                    NSSize::new(width.max(1.0), height.max(1.0)),
+                )
+            })
+            .unwrap_or_default();
+        let window_rect = self.convertRect_toView(local, None);
+        self.window()
+            .map(|window| window.convertRectToScreen(window_rect))
+            .unwrap_or(window_rect)
+    }
+
+    fn put_on_pasteboard(text: &str) {
+        let pasteboard = unsafe { NSPasteboard::generalPasteboard() };
+        unsafe {
+            pasteboard.clearContents();
+            pasteboard.setString_forType(&NSString::from_str(text), NSPasteboardTypeString);
+        }
+    }
+
+    fn mouse_modifiers(event: &NSEvent) -> u8 {
+        let flags = unsafe { event.modifierFlags() };
+        (if flags.contains(NSEventModifierFlags::Shift) { 4 } else { 0 })
+            | (if flags.contains(NSEventModifierFlags::Option) { 8 } else { 0 })
+            | (if flags.contains(NSEventModifierFlags::Control) { 16 } else { 0 })
+    }
+
+    fn begin_pointer(&self, event: &NSEvent, button: MouseButton) {
+        let (x, y) = self.point_in_view(event);
+        let flags = unsafe { event.modifierFlags() };
+        if button == MouseButton::Left && flags.contains(NSEventModifierFlags::Command) {
+            let uri = self
+                .ivars()
+                .surface
+                .borrow()
+                .as_ref()
+                .and_then(|surface| surface.hyperlink_at(x, y));
+            if let Some(url) = uri
+                .as_deref()
+                .and_then(|uri| NSURL::URLWithString(&NSString::from_str(uri)))
+            {
+                if NSWorkspace::sharedWorkspace().openURL(&url) {
+                    return;
+                }
+            }
+        }
+        let report = !flags.contains(NSEventModifierFlags::Shift)
+            && self
+                .ivars()
+                .surface
+                .borrow()
+                .as_ref()
+                .is_some_and(|surface| surface.mouse_reporting_at(x, y));
+        if report {
+            let modifiers = Self::mouse_modifiers(event);
+            if self
+                .ivars()
+                .surface
+                .borrow_mut()
+                .as_mut()
+                .is_some_and(|surface| {
+                    surface.report_mouse(x, y, Some(button), MouseAction::Press, modifiers)
+                })
+            {
+                self.ivars().reported_button.set(Some(button));
+                self.redraw();
+            }
+            return;
+        }
+        if button != MouseButton::Left {
+            return;
+        }
+
+        let kind = if flags.contains(NSEventModifierFlags::Option) {
+            SelectionKind::Block
+        } else if unsafe { event.clickCount() } >= 3 {
+            SelectionKind::Lines
+        } else if unsafe { event.clickCount() } == 2 {
+            SelectionKind::Semantic
+        } else {
+            SelectionKind::Simple
+        };
+        if self
+            .ivars()
+            .surface
+            .borrow_mut()
+            .as_mut()
+            .is_some_and(|surface| surface.begin_selection(x, y, kind))
+        {
+            self.redraw();
+        }
+    }
+
+    fn drag_pointer(&self, event: &NSEvent) {
+        let (x, y) = self.point_in_view(event);
+        if let Some(button) = self.ivars().reported_button.get() {
+            let modifiers = Self::mouse_modifiers(event);
+            if self
+                .ivars()
+                .surface
+                .borrow_mut()
+                .as_mut()
+                .is_some_and(|surface| {
+                    surface.report_mouse(x, y, Some(button), MouseAction::Motion, modifiers)
+                })
+            {
+                self.redraw();
+            }
+            return;
+        }
+        if self
+            .ivars()
+            .surface
+            .borrow_mut()
+            .as_mut()
+            .is_some_and(|surface| surface.update_selection(x, y))
+        {
+            self.redraw();
+        }
+    }
+
+    fn end_pointer(&self, event: &NSEvent) {
+        let (x, y) = self.point_in_view(event);
+        if let Some(button) = self.ivars().reported_button.take() {
+            let modifiers = Self::mouse_modifiers(event);
+            if let Some(surface) = self.ivars().surface.borrow_mut().as_mut() {
+                surface.report_mouse(x, y, Some(button), MouseAction::Release, modifiers);
+            }
+            self.redraw();
+            return;
+        }
+
+        let result = self.ivars().surface.borrow_mut().as_mut().and_then(|surface| {
+            surface.update_selection(x, y);
+            let copy = surface.settings().selection.copy_on_select;
+            surface.finish_selection().map(|text| (copy, text))
+        });
+        if let Some((true, text)) = result {
+            Self::put_on_pasteboard(&text);
+        }
+        self.redraw();
+    }
+
     /// An event's location in this view, in points from the **top** left.
     ///
     /// AppKit's origin is bottom-left and the grid counts rows downward, so
@@ -384,6 +756,9 @@ impl MicaView {
             last_frame: Cell::new(None),
             frame_queued: Arc::new(AtomicBool::new(false)),
             scroll: RefCell::new(ScrollAccumulator::new()),
+            reported_button: Cell::new(None),
+            marked_text: RefCell::new(String::new()),
+            marked_selection: Cell::new(NSRange::new(0, 0)),
         });
         let this: Retained<MicaView> = unsafe { msg_send![super(this), initWithFrame: frame] };
         unsafe {
@@ -612,10 +987,10 @@ impl MicaView {
 
     /// Handles a chord that the binding table claims.
     ///
-    /// Was a `match` on characters, which meant the command palette's
-    /// accelerator column and the actual key handling were two copies of the
-    /// same fact. They had already drifted. Now there is one table, the
-    /// palette prints from it, and `⌘,` edits it.
+    /// Was a `match` on characters, which meant the key handling and every
+    /// place a shortcut was written down were separate copies of the same
+    /// fact, and they drifted. Now there is one table and `settings.toml`
+    /// is the only thing that edits it.
     fn handle_binding(&self, key: Key, modifiers: Modifiers) -> bool {
         let Some(surface) = self.ivars().surface.borrow_mut().as_mut().map(|s| s as *mut Surface)
         else {
@@ -676,17 +1051,6 @@ impl MicaView {
         }
     }
 
-    /// Routes a key to the shortcut panel, if it is open.
-    fn handle_shortcut_panel(&self, key: Key, modifiers: Modifiers) -> bool {
-        let Some(surface) = self.ivars().surface.borrow_mut().as_mut().map(|s| s as *mut Surface)
-        else {
-            return false;
-        };
-        // SAFETY: as above.
-        let surface = unsafe { &mut *surface };
-        surface.shortcut_key(key, modifiers)
-    }
-
     /// Routes a key to an open overlay. Returns whether it was consumed.
     fn handle_overlay_key(
         &self,
@@ -731,8 +1095,8 @@ impl MicaView {
             }
             _ => {
                 // Control combinations are not text; swallowing them silently
-                // would make Ctrl-C inside a palette do nothing at all rather
-                // than closing it.
+                // would make Ctrl-C inside the find bar do nothing at all
+                // rather than closing it.
                 if modifiers.control || modifiers.command {
                     if modifiers.control && characters.eq_ignore_ascii_case("c") {
                         surface.close_overlays();
@@ -756,7 +1120,14 @@ impl MicaView {
         self.ivars().surface.borrow().as_ref().and_then(Surface::selection_text)
     }
 
-    /// Sends pasted text, wrapped in bracketed-paste markers.
+    pub fn select_all(&self) {
+        if let Some(surface) = self.ivars().surface.borrow_mut().as_mut() {
+            surface.select_all();
+            self.redraw();
+        }
+    }
+
+    /// Sends pasted text in the form the focused child negotiated.
     ///
     /// Bracketed paste is what stops a pasted script from executing line by
     /// line as it arrives — the single most dangerous default a terminal can
@@ -769,9 +1140,7 @@ impl MicaView {
         // SAFETY: the borrow above is released at the end of the statement and
         // nothing else touches the surface on this thread in between.
         let surface = unsafe { &mut *surface };
-        surface.write_input(b"\x1b[200~");
-        surface.write_input(text.as_bytes());
-        surface.write_input(b"\x1b[201~");
+        surface.paste(text);
     }
 
     /// Applies a settings file that changed on disk, and redraws.

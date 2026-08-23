@@ -280,6 +280,9 @@ const _: () = {
 #[derive(Debug, Default)]
 pub struct InstanceBuffers {
     pub backgrounds: Vec<BgInstance>,
+    /// Selection overlays are transient: dragging changes them without
+    /// changing terminal cells, so they cannot share the row cache.
+    pub selections: Vec<BgInstance>,
     pub glyphs: Vec<GlyphInstance>,
     pub rules: Vec<RuleInstance>,
     pub gutters: Vec<GutterInstance>,
@@ -309,6 +312,7 @@ impl InstanceBuffers {
     /// gutter, and the overlays. These move without the grid changing, which
     /// is exactly why they cannot be cached alongside it.
     pub fn clear_transient(&mut self) {
+        self.selections.clear();
         self.gutters.clear();
         self.shapes.clear();
         self.decays.clear();
@@ -320,6 +324,7 @@ impl InstanceBuffers {
     /// does no allocation at all.
     pub fn clear(&mut self) {
         self.backgrounds.clear();
+        self.selections.clear();
         self.glyphs.clear();
         self.rules.clear();
         self.gutters.clear();
@@ -331,6 +336,7 @@ impl InstanceBuffers {
 
     pub fn is_empty(&self) -> bool {
         self.backgrounds.is_empty()
+            && self.selections.is_empty()
             && self.glyphs.is_empty()
             && self.rules.is_empty()
             && self.gutters.is_empty()
@@ -342,6 +348,7 @@ impl InstanceBuffers {
 
     pub fn total(&self) -> usize {
         self.backgrounds.len()
+            + self.selections.len()
             + self.glyphs.len()
             + self.rules.len()
             + self.gutters.len()

@@ -246,7 +246,19 @@ mod alternate_screen_tests {
     use mica_core::backend::TerminalModes;
 
     fn modes(alt: bool, app: bool, mouse: bool) -> TerminalModes {
-        TerminalModes { alt_screen: alt, application_cursor: app, mouse_reporting: mouse }
+        TerminalModes {
+            alt_screen: alt,
+            application_cursor: app,
+            mouse_reporting: mouse,
+            mouse_tracking: if mouse {
+                mica_core::backend::MouseTracking::Click
+            } else {
+                mica_core::backend::MouseTracking::Off
+            },
+            mouse_encoding: mica_core::backend::MouseEncoding::Legacy,
+            focus_reporting: false,
+            bracketed_paste: false,
+        }
     }
 
     #[test]

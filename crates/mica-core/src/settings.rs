@@ -108,6 +108,13 @@ impl Default for ShellSettings {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SelectionSettings {
+    /// Copy completed mouse selections to the pasteboard. Disabled by default
+    /// so merely pointing at text never mutates global clipboard state.
+    pub copy_on_select: bool,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
     pub theme: String,
@@ -132,6 +139,8 @@ pub struct Settings {
     pub ambient: AmbientSettings,
     /// What shell to run and where.
     pub shell: ShellSettings,
+    /// Mouse-selection clipboard policy.
+    pub selection: SelectionSettings,
     /// Keyboard bindings that differ from the defaults, as
     /// `action id -> chord`. Stored as strings because the chord grammar
     /// belongs to the window layer: this crate must not learn what a modifier
@@ -155,6 +164,7 @@ impl Default for Settings {
             motion: MotionSettings::default(),
             ambient: AmbientSettings::default(),
             shell: ShellSettings::default(),
+            selection: SelectionSettings::default(),
             keys: std::collections::BTreeMap::new(),
         }
     }
@@ -176,6 +186,8 @@ pub struct SettingsFile {
     pub ambient: Option<Ambient>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shell: Option<Shell>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<SelectionConfig>,
     /// `action id = "chord"`. Free-form on purpose — the window layer owns the
     /// grammar and validates it, and an entry this version does not recognise
     /// is carried rather than rejected.
@@ -258,6 +270,13 @@ pub struct Shell {
     pub new_pane_from_focused_pane: Option<PaneOrigin>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub focus_new_panes: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct SelectionConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub copy_on_select: Option<bool>,
 }
 
 #[derive(Debug)]
@@ -367,6 +386,11 @@ impl Settings {
                 s.shell.focus_new_panes = v;
             }
         }
+        if let Some(selection) = &file.selection {
+            if let Some(v) = selection.copy_on_select {
+                s.selection.copy_on_select = v;
+            }
+        }
         if let Some(keys) = &file.keys {
             s.keys = keys.clone();
         }
@@ -426,6 +450,10 @@ impl Settings {
             focus_new_panes: (self.shell.focus_new_panes != d.shell.focus_new_panes)
                 .then_some(self.shell.focus_new_panes),
         };
+        let selection = SelectionConfig {
+            copy_on_select: (self.selection.copy_on_select != d.selection.copy_on_select)
+                .then_some(self.selection.copy_on_select),
+        };
 
         SettingsFile {
             appearance: (appearance != Appearance::default()).then_some(appearance),
@@ -434,6 +462,7 @@ impl Settings {
             motion: (motion != Motion::default()).then_some(motion),
             ambient: (ambient != Ambient::default()).then_some(ambient),
             shell: (shell != Shell::default()).then_some(shell),
+            selection: (selection != SelectionConfig::default()).then_some(selection),
             keys: (!self.keys.is_empty()).then(|| self.keys.clone()),
         }
     }
@@ -480,6 +509,9 @@ impl Settings {
                 starting_dir: Some(self.shell.starting_dir.clone().unwrap_or_default()),
                 new_pane_from_focused_pane: Some(self.shell.new_pane_origin),
                 focus_new_panes: Some(self.shell.focus_new_panes),
+            }),
+            selection: Some(SelectionConfig {
+                copy_on_select: Some(self.selection.copy_on_select),
             }),
             keys: Some(self.keys.clone()),
         }
@@ -638,9 +670,12 @@ mod tests {
         s.font_size = 15.5;
         s.frame_cap = 60;
         s.motion.reduce = true;
+        s.selection.copy_on_select = true;
 
         let text = s.serialize().unwrap();
         assert_eq!(Settings::parse(&text).unwrap(), s);
+        assert!(text.contains("[selection]"));
+        assert!(text.contains("copy-on-select = true"));
     }
 
     #[test]
@@ -651,7 +686,7 @@ mod tests {
         s.keys.insert("find.toggle".into(), "cmd+j".into());
         // An empty value is how a deliberately unbound action is recorded, and
         // it has to survive the round trip or the removal is silently undone.
-        s.keys.insert("palette.toggle".into(), String::new());
+        s.keys.insert("find.toggle".into(), String::new());
 
         let text = s.serialize().unwrap();
         assert!(text.contains("[keys]"), "{text}");

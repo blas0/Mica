@@ -31,7 +31,10 @@ use alacritty_terminal::vte::ansi::{
 };
 
 use crate::backend::mirror::Mirror;
-use crate::backend::{CursorShape, CursorState, Point, RowRef, Selection, TerminalCore, TerminalModes};
+use crate::backend::{
+    CursorShape, CursorState, MouseEncoding, MouseTracking, Point, RowRef, Selection,
+    SelectionKind, TerminalCore, TerminalModes,
+};
 use crate::cell::{Cell, CellContent, CellFlags, Color, NO_EXTRA};
 use crate::semantic::{OscSniffer, SemanticEvent};
 use crate::sidetable::{Extras, SideTables};
@@ -303,6 +306,24 @@ impl TerminalCore for AlacrittyCore {
             alt_screen: mode.contains(TermMode::ALT_SCREEN),
             application_cursor: mode.contains(TermMode::APP_CURSOR),
             mouse_reporting: mode.intersects(TermMode::MOUSE_MODE),
+            mouse_tracking: if mode.contains(TermMode::MOUSE_MOTION) {
+                MouseTracking::Motion
+            } else if mode.contains(TermMode::MOUSE_DRAG) {
+                MouseTracking::Drag
+            } else if mode.contains(TermMode::MOUSE_REPORT_CLICK) {
+                MouseTracking::Click
+            } else {
+                MouseTracking::Off
+            },
+            mouse_encoding: if mode.contains(TermMode::SGR_MOUSE) {
+                MouseEncoding::Sgr
+            } else if mode.contains(TermMode::UTF8_MOUSE) {
+                MouseEncoding::Utf8
+            } else {
+                MouseEncoding::Legacy
+            },
+            focus_reporting: mode.contains(TermMode::FOCUS_IN_OUT),
+            bracketed_paste: mode.contains(TermMode::BRACKETED_PASTE),
         }
     }
 
@@ -328,37 +349,82 @@ impl TerminalCore for AlacrittyCore {
     }
 
     fn selection(&self) -> Option<Selection> {
-        let range = self.term.selection.as_ref()?.to_range(&self.term)?;
+        let selection = self.term.selection.as_ref()?;
+        let range = selection.to_range(&self.term)?;
         let offset = self.term.grid().display_offset() as i32;
         Some(Selection {
             start: Point::new(range.start.line.0 + offset, range.start.column.0 as u16),
             end: Point::new(range.end.line.0 + offset, range.end.column.0 as u16),
-            rectangular: range.is_block,
+            kind: match selection.ty {
+                SelectionType::Simple => SelectionKind::Simple,
+                SelectionType::Block => SelectionKind::Block,
+                SelectionType::Semantic => SelectionKind::Semantic,
+                SelectionType::Lines => SelectionKind::Lines,
+            },
         })
     }
 
     fn set_selection(&mut self, selection: Option<Selection>) {
         self.term.selection = selection.map(|s| {
-            let offset = self.term.grid().display_offset();
-            let ty = if s.rectangular { SelectionType::Block } else { SelectionType::Simple };
-            let start = viewport_to_point(
-                offset,
-                AlacPoint::new(s.start.line.max(0) as usize, Column(s.start.column as usize)),
-            );
-            let end = viewport_to_point(
-                offset,
-                AlacPoint::new(s.end.line.max(0) as usize, Column(s.end.column as usize)),
-            );
+            let offset = self.term.grid().display_offset() as i32;
+            let ty = match s.kind {
+                SelectionKind::Simple => SelectionType::Simple,
+                SelectionKind::Block => SelectionType::Block,
+                SelectionKind::Semantic => SelectionType::Semantic,
+                SelectionKind::Lines => SelectionType::Lines,
+            };
+            let to_terminal_point = |point: Point| {
+                let line = Line(
+                    point
+                        .line
+                        .saturating_sub(offset)
+                        .clamp(self.term.topmost_line().0, self.term.bottommost_line().0),
+                );
+                let column = Column(usize::from(point.column).min(self.term.last_column().0));
+                AlacPoint::new(line, column)
+            };
+            let start = to_terminal_point(s.start);
+            let end = to_terminal_point(s.end);
             let mut sel = AlacSelection::new(ty, start, Side::Left);
             sel.update(end, Side::Right);
             sel
         });
-        // Selection is drawn from cell state, so the affected rows must repaint.
-        self.mirror.damage_all();
     }
 
     fn selection_text(&self) -> Option<String> {
         self.term.selection_to_string()
+    }
+
+    fn hyperlink_at(&self, point: Point) -> Option<String> {
+        let (cols, rows) = self.dimensions();
+        if point.line < 0 || point.line >= i32::from(rows) || point.column >= cols {
+            return None;
+        }
+        let terminal_point = viewport_to_point(
+            self.term.grid().display_offset(),
+            AlacPoint::new(point.line as usize, Column(point.column as usize)),
+        );
+        self.term.grid()[terminal_point]
+            .hyperlink()
+            .map(|link| link.uri().to_owned())
+    }
+
+    fn visible_text(&self) -> String {
+        let grid = self.term.grid();
+        let top = -(grid.display_offset() as i32);
+        let bottom = top + grid.screen_lines() as i32 - 1;
+        let last_column = Column(grid.columns().saturating_sub(1));
+        let mut text = String::new();
+        for line in top..=bottom {
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            text.push_str(&self.term.bounds_to_string(
+                AlacPoint::new(Line(line), Column(0)),
+                AlacPoint::new(Line(line), last_column),
+            ));
+        }
+        text
     }
 
     fn drain_semantic_events(&mut self) -> Vec<SemanticEvent> {
