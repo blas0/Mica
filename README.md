@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/mica-wordmark.png" alt="Mica" width="720">
+</p>
+
 # Mica
 Terminal emulator focused on smooth motion and lightweight rendering.
 

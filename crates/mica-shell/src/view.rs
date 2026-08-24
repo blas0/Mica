@@ -1121,10 +1121,14 @@ impl MicaView {
     }
 
     pub fn select_all(&self) {
-        if let Some(surface) = self.ivars().surface.borrow_mut().as_mut() {
+        {
+            let mut borrowed = self.ivars().surface.borrow_mut();
+            let Some(surface) = borrowed.as_mut() else { return };
             surface.select_all();
-            self.redraw();
         }
+        // `redraw` borrows the surface again. Keep it outside the scope above
+        // or Command-A panics in the AppKit action callback and exits the app.
+        self.redraw();
     }
 
     /// Sends pasted text in the form the focused child negotiated.
