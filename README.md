@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/mica-wordmark.png" alt="Mica" width="720">
+  <img src="assets/mica-wordmark.png" alt="Mica" width="180">
 </p>
 
 # Mica
