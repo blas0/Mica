@@ -10,6 +10,13 @@ set -euo pipefail
 PROFILE="${1:-release}"
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 APP="$ROOT/target/$PROFILE/Mica.app"
+SIGNING_IDENTITY="${MICA_SIGNING_IDENTITY:--}"
+ENTITLEMENTS="${MICA_ENTITLEMENTS:-$ROOT/resources/Mica.distribution.entitlements}"
+
+[ -f "$ENTITLEMENTS" ] || {
+  echo "bundle: entitlements file not found: $ENTITLEMENTS" >&2
+  exit 1
+}
 
 cargo build --profile "$PROFILE" -p mica-shell --bin mica
 
@@ -28,11 +35,12 @@ cp "$METALLIB" "$APP/Contents/Resources/default.metallib"
 
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
-codesign --force --sign - \
+codesign --force --sign "$SIGNING_IDENTITY" \
     --options runtime \
-    --entitlements "$ROOT/resources/Mica.entitlements" \
-    "$APP" >/dev/null 2>&1 \
-  || codesign --force --sign - --entitlements "$ROOT/resources/Mica.entitlements" "$APP"
+    --entitlements "$ENTITLEMENTS" \
+    "$APP"
 
 echo "built $APP"
+echo "signing identity: $SIGNING_IDENTITY"
+echo "entitlements: $ENTITLEMENTS"
 codesign -dv "$APP" 2>&1 | sed -n '1,6p'

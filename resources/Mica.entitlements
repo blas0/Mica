@@ -2,6 +2,7 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<!-- Development-only entitlements. Do not use this file for distribution. -->
 	<!-- Not sandboxed. Unavoidable for a terminal: the whole point is to run
 	     arbitrary programs with the user's own access to their own files. -->
 

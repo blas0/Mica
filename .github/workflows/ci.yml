@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    runs-on: macos-14
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Compile all workspace tests
+        run: cargo test --workspace --no-run
+
+      - name: Run CPU-only tests
+        run: cargo test -p mica-core -p mica-atlas
+
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets
+
+      - name: Build release binary
+        run: cargo build --release -p mica-shell --bin mica

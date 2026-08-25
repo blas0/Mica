@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+		Distribution builds are intentionally not granted development or
+		inherited privacy entitlements. Mica is not sandboxed because it is a
+		terminal, but a public signature must not carry debugger exceptions.
+	-->
+</dict>
+</plist>
