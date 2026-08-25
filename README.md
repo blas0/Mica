@@ -58,3 +58,24 @@ its name into the shell:
 Zsh chains `.zprofile`, `.zshenv`, and `.zshrc` from the user's original
 `ZDOTDIR`, so aliases can find executables added to `PATH` by login-profile
 setup.
+
+### Build and run locally
+
+Notarisation is not required to compile or run a local build. Mica needs macOS
+14 or newer, Rust 1.90, Xcode or the Command Line Tools for `xcrun metal` and
+`xcrun metallib`, and a working Metal device. Zig is not required for the
+default Alacritty backend.
+
+```sh
+export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:$PATH"
+cargo build --release -p mica-shell --bin mica
+./bundle.sh release
+open target/release/Mica.app
+```
+
+The bundle is ad-hoc signed for local use. A copy downloaded from elsewhere
+may still trigger a Gatekeeper warning; Developer ID signing and notarisation
+are distribution requirements, not build requirements. The full workspace
+test suite includes Metal renderer tests and must run on a machine with a
+working Metal device; otherwise those tests report `NoDevice` even though the
+project can compile.
